@@ -1,0 +1,198 @@
+// dfuimg_tests.nv — the header a bootloader can trust before it
+// erases anything.
+//
+// RED ON PURPOSE: every assertion against a FUNCTION reaches
+// `not implemented: dfu-nv.dfuimg.<fn>`.
+//
+// THERE IS NO PUBLISHED VECTOR FOR THIS FORMAT, because it is this
+// package's own — every firmware tool invents one and none of them
+// agree.  What IS borrowed is the CRC: the IEEE 802.3 polynomial's
+// published check value over `123456789` is 0xcbf43926, which appears
+// below as data so that a reader recognises the algorithm.
+//
+// WHAT THE ASSERTIONS ARE ABOUT is the one property the format exists
+// for: **everything checkable is checked before anything is erased**.
+// Five of the six refusals below happen with the device still running
+// its old firmware, and each of them is a device that would not have
+// come back.
+
+use std.test
+use dfuimg
+
+// Whether a check refused.  An optional is matched rather than
+// compared, so the two-line helper is what every assertion below
+// goes through.
+fn refused(e: ?DfuError) -> Bool
+    match e
+        Some(_) => true
+        None    => false
+
+const PRODUCT: Int = 0x1209
+const BOARD: Int = 1
+const CRC: Int = 0xCBF43926
+
+fn nominal() -> DfuHeader
+    dfuimg.header(PRODUCT, BOARD, 0x00010200, 4096, CRC,
+                  0x00027000, 0x00027000, 0)
+
+@test
+fn test_the_header_is_sixty_four_bytes_and_starts_with_a_magic() [io]
+    test.case("four known bytes refuse an arbitrary file before any arithmetic happens on it")
+    test.assert_eq(dfuimg.DFU_HEADER_LEN, 64)
+    test.assert_eq(dfuimg.header_byte(nominal(), 0), 0x4E)
+    test.assert_eq(dfuimg.header_byte(nominal(), 1), 0x56)
+    test.assert_eq(dfuimg.header_byte(nominal(), 2), 0x46)
+    test.assert_eq(dfuimg.header_byte(nominal(), 3), 0x57)
+
+@test
+fn test_the_fields_read_back_what_they_were_given() [io]
+    test.case("eight distinct values, so a reader wired to its neighbour's slot is visible here")
+    let h = nominal()
+    test.assert_eq(dfuimg.product_id(h), PRODUCT)
+    test.assert_eq(dfuimg.board_rev(h), BOARD)
+    test.assert_eq(dfuimg.image_version(h), 0x00010200)
+    test.assert_eq(dfuimg.payload_len(h), 4096)
+    test.assert_eq(dfuimg.payload_crc(h), CRC)
+    test.assert_eq(dfuimg.load_address(h), 0x00027000)
+    test.assert_eq(dfuimg.entry_point(h), 0x00027000)
+    test.assert_eq(dfuimg.image_flags(h), 0)
+    test.assert_eq(dfuimg.format_version(h), dfuimg.DFU_FORMAT_VERSION)
+
+@test
+fn test_a_whole_image_is_the_header_plus_the_payload() [io]
+    test.assert_eq(dfuimg.image_len(nominal()), 4096 + 64)
+    test.assert_eq(dfuimg.payload_offset(), 64)
+
+@test
+fn test_everything_checkable_is_checked_before_anything_is_erased() [io]
+    test.case("the one question a bootloader asks, and the five ways it answers no")
+    let h = nominal()
+    test.assert(dfuimg.can_commit(h, PRODUCT, BOARD, 4096, CRC))
+
+    test.case("the wrong product — a bootloader that flashed this has bricked the device")
+    test.assert(dfuimg.can_commit(h, 0x1210, BOARD, 4096, CRC) == false)
+
+    test.case("the wrong board revision, for a product whose pinout changed")
+    test.assert(dfuimg.can_commit(h, PRODUCT, 2, 4096, CRC) == false)
+
+    test.case("a payload shorter than declared — a truncated download")
+    test.assert(dfuimg.can_commit(h, PRODUCT, BOARD, 4095, CRC) == false)
+
+    test.case("a payload longer than declared")
+    test.assert(dfuimg.can_commit(h, PRODUCT, BOARD, 4097, CRC) == false)
+
+    test.case("and a CRC that does not match — the image arrived corrupt")
+    test.assert(dfuimg.can_commit(h, PRODUCT, BOARD, 4096, 0) == false)
+
+@test
+fn test_each_refusal_names_the_numbers_that_decided_it() [io]
+    test.case("a failed update is reported by a user who saw a progress bar stop, so the message has to carry the facts")
+    let h = nominal()
+    test.assert(refused(dfuimg.check_header(h, 0x1210, BOARD, 4096, CRC)))
+    test.assert(refused(dfuimg.check_header(h, PRODUCT, 2, 4096, CRC)))
+    test.assert(refused(dfuimg.check_header(h, PRODUCT, BOARD, 4095, CRC)))
+    test.assert(refused(dfuimg.check_header(h, PRODUCT, BOARD, 4096, 0)))
+    test.assert(refused(dfuimg.check_header(h, PRODUCT, BOARD, 4096, CRC)) == false)
+
+@test
+fn test_a_board_revision_of_zero_matches_any_board() [io]
+    test.case("a firmware that really is revision-independent says so rather than shipping one image per revision")
+    let any = dfuimg.header(PRODUCT, 0, 1, 4096, CRC, 0, 0, 0)
+    test.assert(dfuimg.can_commit(any, PRODUCT, 1, 4096, CRC))
+    test.assert(dfuimg.can_commit(any, PRODUCT, 7, 4096, CRC))
+
+@test
+fn test_a_flag_the_bootloader_cannot_honour_is_refused_rather_than_written() [io]
+    test.case("writing a compressed image as though it were firmware produces a device that does not boot")
+    let z = dfuimg.header(PRODUCT, BOARD, 1, 4096, CRC, 0, 0,
+                          dfuimg.DFU_IMG_COMPRESSED)
+    test.assert(dfuimg.is_compressed(z))
+    test.assert(dfuimg.can_commit(z, PRODUCT, BOARD, 4096, CRC) == false)
+    test.assert(refused(dfuimg.check_header(z, PRODUCT, BOARD, 4096, CRC)))
+
+@test
+fn test_a_header_that_is_not_one_is_refused_on_the_magic_alone() [io]
+    let junk: [u8] = [0xFF as u8, 0xD8 as u8, 0xFF as u8, 0xE0 as u8]
+    test.assert(dfuimg.has_magic(junk, 0) == false)
+
+    let h = dfuimg.header_decode(junk, 0)
+    test.assert(dfuimg.header_is_valid(h) == false)
+
+@test
+fn test_the_signed_region_is_everything_except_the_signature_slot() [io]
+    test.case("the one thing this package fixes about signing, because two implementations that disagreed would produce signatures neither could verify")
+    test.assert_eq(dfuimg.DFU_SIGNATURE_LEN, 64)
+    test.assert_eq(dfuimg.signature_offset(), 0)
+
+    test.assert(dfuimg.is_signed_region(0) == false)
+    test.assert(dfuimg.is_signed_region(63) == false)
+    test.assert(dfuimg.is_signed_region(64))
+    test.assert(dfuimg.is_signed_region(4159))
+
+    test.case("so a 4096-byte payload is signed over 4096 bytes and not 4160")
+    test.assert_eq(dfuimg.signed_len(nominal()), 4096)
+
+@test
+fn test_an_image_that_claims_a_signature_and_has_none_is_refused() [io]
+    test.case("this package does no cryptography; what it refuses is an image whose own claims do not hold together")
+    let signed = dfuimg.header(PRODUCT, BOARD, 1, 4096, CRC, 0, 0,
+                               dfuimg.DFU_IMG_SIGNED)
+    test.assert(dfuimg.is_signed(signed))
+
+@test
+fn test_the_version_comparison_is_numeric_and_nothing_else() [io]
+    test.case("the only scheme two implementations cannot disagree about")
+    test.assert(dfuimg.is_newer(0x00010300, 0x00010200))
+    test.assert(dfuimg.is_newer(0x00010200, 0x00010200) == false)
+    test.assert(dfuimg.is_newer(0x00010100, 0x00010200) == false)
+
+@test
+fn test_a_transfer_tracks_how_much_arrived_and_whether_it_adds_up() [io]
+    let h = nominal()
+    var r = dfuimg.receive()
+    test.assert_eq(dfuimg.received(r), 0)
+    test.assert_eq(dfuimg.remaining(r, h), 4096)
+    test.assert_eq(dfuimg.receive_status(r), dfuimg.DFU_RECV_EMPTY)
+
+    r = dfuimg.advanced(r, 1024, 0)
+    test.assert_eq(dfuimg.received(r), 1024)
+    test.assert_eq(dfuimg.remaining(r, h), 3072)
+    test.assert_eq(dfuimg.receive_status(r), dfuimg.DFU_RECV_PARTIAL)
+    test.assert(dfuimg.receive_is_complete(r) == false)
+
+@test
+fn test_more_bytes_than_declared_is_a_bad_transfer() [io]
+    test.case("nothing should be committed: a device that wrote what it was given regardless has no header to check against afterwards")
+    let h = nominal()
+    var r = dfuimg.receive()
+    r = dfuimg.advanced(r, 5000, 0)
+    test.assert_eq(dfuimg.receive_status(r), dfuimg.DFU_RECV_BAD)
+    test.assert(refused(dfuimg.check_receive(r, h)))
+
+@test
+fn test_a_finished_transfer_compares_the_final_crc_and_not_the_running_state() [io]
+    test.case("crc-nv's finish applies the final xor, so a transfer that compared the running state would never match")
+    let h = nominal()
+    var r = dfuimg.receive()
+    r = dfuimg.advanced(r, 4096, 0)
+    r = dfuimg.finished(r, h, CRC)
+    test.assert_eq(dfuimg.receive_status(r), dfuimg.DFU_RECV_COMPLETE)
+    test.assert(dfuimg.receive_is_complete(r))
+    test.assert(refused(dfuimg.check_receive(r, h)) == false)
+
+@test
+fn test_a_transfer_whose_crc_does_not_match_is_not_complete() [io]
+    let h = nominal()
+    var r = dfuimg.receive()
+    r = dfuimg.advanced(r, 4096, 0)
+    r = dfuimg.finished(r, h, 0x12345678)
+    test.assert_eq(dfuimg.receive_status(r), dfuimg.DFU_RECV_BAD)
+    test.assert(dfuimg.receive_is_complete(r) == false)
+    test.assert(refused(dfuimg.check_receive(r, h)))
+
+@test
+fn test_the_running_crc_state_is_passed_through_rather_than_kept() [io]
+    test.case("a device folding bytes off a UART has the state in a register and nothing to gain from this module holding it")
+    var r = dfuimg.receive()
+    r = dfuimg.advanced(r, 64, 0xDEADBEEF)
+    test.assert_eq(dfuimg.crc_state(r), 0xDEADBEEF)

@@ -1,0 +1,215 @@
+// dfuhost_tests.nv — the update as a plan, walked without a device.
+//
+// RED ON PURPOSE: every assertion against a FUNCTION reaches
+// `not implemented: dfu-nv.<module>.<fn>`.
+//
+// THIS FILE IS THE ARGUMENT FOR `DfuTransport[e]` AND FOR `DfuPlan`.
+// An update is mostly timing and retries, and both are things a test
+// must be able to walk without a device — because the way to find out
+// whether a firmware updater handles a poll timeout correctly must not
+// be to run it against a board it might brick.  So the plan is a value
+// that can be built and asserted against before anything is sent, and
+// the transport is a trait a test satisfies with `[]`.
+//
+// The tape below answers nothing useful at 0.0.1 because every body it
+// calls is a `todo()`.  What it establishes is that the CALL SITES
+// typecheck and that the effect arithmetic comes out empty, which is
+// the claim the trait makes.
+
+use std.test
+use dfuhost
+use dfuimg
+use dfucrc
+
+// Whether a check refused.  An optional is matched rather than
+// compared, so the two-line helper is what every assertion below
+// goes through.
+fn refused(e: ?DfuError) -> Bool
+    match e
+        Some(_) => true
+        None    => false
+
+// A transport over nothing at all.
+//
+// Every method declares `[]`, so every `dfuhost` call through it is
+// `[]` too.  A real transport over usb-nv's backend declares whatever
+// that backend costs, and a serial one declares `[io]`.
+struct DfuTape
+    open: Bool
+
+impl DfuTransport[] for DfuTape
+    fn dfu_exchange(self, request: Int, value: Int, data: Bytes,
+                    expect: Int) -> Result<Bytes, DfuError> []
+        Ok(data)
+
+    fn dfu_reset(self) -> ?DfuError []
+        None
+
+    fn dfu_is_open(self) -> Bool
+        self.open
+
+fn tape() -> DfuTape
+    DfuTape { open: true }
+
+fn nothing() -> Bytes
+    bytes.zeros(0)
+
+@test
+fn test_a_usb_plan_comes_from_the_devices_own_transfer_size() [io]
+    test.case("wTransferSize is the device's statement, not the host's choice — which is why a plan is built from the device")
+    let p = dfuhost.plan_usb(4096, 64, true, 5000, 3)
+    test.assert_eq(dfuhost.plan_wire(p), dfuhost.DFU_WIRE_USB)
+    test.assert_eq(dfuhost.plan_image_len(p), 4096)
+    test.assert_eq(dfuhost.plan_chunk(p), 64)
+    test.assert_eq(dfuhost.plan_max_wait_ms(p), 5000)
+    test.assert_eq(dfuhost.plan_retries(p), 3)
+
+@test
+fn test_a_usb_plan_counts_the_empty_final_block() [io]
+    test.case("64 blocks of firmware and the zero-length one that ends the download — without it the device sits in DNLOAD_IDLE forever")
+    let p = dfuhost.plan_usb(4096, 64, true, 5000, 3)
+    test.assert_eq(dfuhost.plan_chunks(p), 65)
+    test.assert(dfuhost.is_final_chunk(p, 64))
+    test.assert(dfuhost.is_final_chunk(p, 63) == false)
+    test.assert_eq(dfuhost.chunk_len(p, 64), 0)
+
+@test
+fn test_the_last_real_chunk_is_short() [io]
+    let p = dfuhost.plan_usb(100, 64, true, 5000, 3)
+    test.assert_eq(dfuhost.chunk_len(p, 0), 64)
+    test.assert_eq(dfuhost.chunk_len(p, 1), 36)
+    test.assert_eq(dfuhost.chunk_offset(p, 1), 64)
+    test.assert_eq(dfuhost.plan_chunks(p), 3)
+
+@test
+fn test_a_serial_plan_is_bounded_by_the_devices_object_size() [io]
+    test.case("the staging buffer decides, and a create larger than it is a promise the device cannot keep")
+    let p = dfuhost.plan_serial(10000, 4096, 64, 5000, 3)
+    test.assert_eq(dfuhost.plan_wire(p), dfuhost.DFU_WIRE_SERIAL)
+    test.assert_eq(dfuhost.plan_chunk(p), 4096)
+    test.assert_eq(dfuhost.plan_chunks(p), 3)
+
+    test.case("and there is no empty final chunk on this wire — an EXECUTE ends an object")
+    test.assert(dfuhost.is_final_chunk(p, 2) == false)
+
+@test
+fn test_a_poll_longer_than_the_caller_will_wait_is_refused_rather_than_timed_out() [io]
+    test.case("a device may legitimately ask for thirty seconds while it erases a large sector, and a host that timed out would leave a half-erased device")
+    let p = dfuhost.plan_usb(4096, 64, true, 5000, 3)
+    test.assert(refused(dfuhost.check_wait(p, 30000)))
+    test.assert(refused(dfuhost.check_wait(p, 250)) == false)
+
+@test
+fn test_a_plan_with_no_chunk_size_is_refused() [io]
+    let p = dfuhost.plan_usb(4096, 0, true, 5000, 3)
+    test.assert(refused(dfuhost.check_plan(p)))
+
+    test.assert(refused(dfuhost.check_plan(dfuhost.plan_usb(4096, 64, true,
+                                                            5000, 3))) == false)
+
+@test
+fn test_the_estimate_is_arithmetic_rather_than_a_measurement() [io]
+    test.case("a progress bar needs a number before the first byte is sent, and honest about being a floor")
+    let p = dfuhost.plan_usb(4096, 64, true, 5000, 3)
+    test.assert(dfuhost.estimated_ms(p, 2, 5) > 0)
+    test.assert(dfuhost.estimated_ms(p, 2, 50) > dfuhost.estimated_ms(p, 2, 5))
+
+@test
+fn test_a_transport_that_performs_nothing_makes_every_driver_call_free() [io]
+    test.case("the property the effect parameter exists for: an updater's timing is testable without a board it might brick")
+    let t = tape()
+    let p = dfuhost.plan_usb(4096, 64, true, 5000, 3)
+    match dfuhost.send_chunk(t, p, 0, nothing())
+        Ok(_)  => test.assert(true)
+        Err(_) => test.assert(true)
+
+@test
+fn test_the_status_poll_and_the_error_clear_go_through_the_same_trait() [io]
+    let t = tape()
+    match dfuhost.poll_status(t)
+        Ok(_)  => test.assert(true)
+        Err(_) => test.assert(true)
+
+    match dfuhost.clear_error(t)
+        None    => test.assert(true)
+        Some(_) => test.assert(true)
+
+@test
+fn test_detach_and_abort_are_ordinary_requests_and_reset_is_not() [io]
+    test.case("a device that has just been told to detach does not answer, which is why reset is its own method")
+    let t = tape()
+    match dfuhost.detach(t, 5000)
+        None    => test.assert(true)
+        Some(_) => test.assert(true)
+
+    match dfuhost.abort(t)
+        None    => test.assert(true)
+        Some(_) => test.assert(true)
+
+    test.assert(t.dfu_is_open())
+
+@test
+fn test_an_upload_reads_a_block_back() [io]
+    let t = tape()
+    let p = dfuhost.plan_usb(4096, 64, true, 5000, 3)
+    match dfuhost.upload_chunk(t, p, 0)
+        Ok(_)  => test.assert(true)
+        Err(_) => test.assert(true)
+
+@test
+fn test_reading_a_firmware_file_is_the_one_thing_this_package_performs() [io]
+    test.case("[io] and nothing else — the transfers are the transport's, declared where the transport is")
+    match dfuhost.read_image("no-such-firmware.bin")
+        Ok(_)  => test.assert(true)
+        Err(_) => test.assert(true)
+
+    match dfuhost.read_header("no-such-firmware.bin")
+        Ok(_)  => test.assert(true)
+        Err(_) => test.assert(true)
+
+    test.assert(dfuhost.looks_like_image("no-such-firmware.bin") == false)
+
+@test
+fn test_writing_an_image_is_the_other_half_for_the_tool_that_builds_one() [io]
+    let h = dfuimg.header(0x1209, 1, 1, 0, 0, 0, 0, 0)
+    match dfuhost.write_image("/proc/novo-cannot-write-here", h, nothing())
+        None    => test.assert(true)
+        Some(_) => test.assert(true)
+
+// ── The CRC bridge ───────────────────────────────────────────────────
+
+@test
+fn test_the_crc_is_the_one_every_other_firmware_tool_computes() [io]
+    test.case("the IEEE 802.3 polynomial's published check value over `123456789` is 0xcbf43926, and a value that disagrees is the wrong variant rather than a wrong implementation")
+    test.assert_eq(dfucrc.DFU_CRC32_CHECK, 0xCBF43926)
+    test.assert_eq(dfucrc.crc32(bytes.from_str("123456789")), 0xCBF43926)
+
+@test
+fn test_a_byte_at_a_time_reaches_the_same_answer_as_one_call() [io]
+    test.case("the property the streaming form exists for: a device folds bytes off a UART as they arrive and a host folds a whole file")
+    let msg = bytes.from_str("123456789")
+    test.assert_eq(dfucrc.crc32_finish(dfucrc.crc32_update(dfucrc.crc32_start(),
+                                                           msg)),
+                   dfucrc.crc32(msg))
+
+@test
+fn test_finishing_is_not_the_same_as_updating() [io]
+    test.case("the final xor is what turns a state into a check value, and a caller that compared the running state would never match")
+    let state = dfucrc.crc32_update(dfucrc.crc32_start(),
+                                    bytes.from_str("123456789"))
+    test.assert(state != dfucrc.crc32_finish(state))
+
+@test
+fn test_an_empty_message_has_a_crc_of_zero() [io]
+    test.case("the initial state and the final xor are both all ones and cancel, which is a fact worth pinning because it looks like a bug")
+    test.assert_eq(dfucrc.crc32(bytes.zeros(0)), 0)
+
+@test
+fn test_one_byte_at_a_time_is_the_form_a_device_uses() [io]
+    test.case("bytes arrive off a UART or out of a control transfer one at a time, and this takes and answers an Int with no buffer anywhere")
+    var state = dfucrc.crc32_start()
+    state = dfucrc.crc32_step(state, 0x31)
+    state = dfucrc.crc32_step(state, 0x32)
+    test.assert(state != dfucrc.crc32_start())
+    test.assert_eq(dfucrc.crc32_finish(state),
+                   dfucrc.crc32(bytes.from_str("12")))

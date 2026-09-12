@@ -1,0 +1,252 @@
+// dfuusb.nv — DFU as a USB interface: the descriptors and the six
+// class requests.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// THIS MODULE IS THE MAPPING AND NOTHING ELSE.  The state machine is
+// `dfustate`'s and the serial bootloader drives the same one; what is
+// here is how a DFU request arrives over USB — as a class request on
+// interface 0 — and what the functional descriptor says about the
+// device.  Keeping the two apart is what lets one state machine serve
+// both transports, and it is why `dfustate` names no usb-nv type.
+//
+// THE FUNCTIONAL DESCRIPTOR IS WHERE A HOST LEARNS THE BLOCK SIZE, and
+// getting it wrong is a specific and common failure: `wTransferSize`
+// is how many bytes a DNLOAD may carry, a host that sends more gets a
+// stall, and a device that declares more than its staging buffer holds
+// overruns it.  `check_functional` refuses both.
+//
+// A DFU DEVICE ENUMERATES TWICE, and that is the part a first
+// implementation does not expect.  In run-time mode it is the
+// application with a DFU interface bolted on; DFU_DETACH plus a bus
+// reset makes it re-enumerate in DFU mode as a different device, often
+// with a different product identifier.  `RUNTIME_PROTOCOL` and
+// `DFU_MODE_PROTOCOL` are the two `bInterfaceProtocol` values that
+// tell them apart, and a host that does not check which one it is
+// talking to sends DNLOAD to an application and gets a stall it cannot
+// explain.
+
+use dfustate
+
+// ── The class numbers ────────────────────────────────────────────────
+
+// bInterfaceClass for DFU: 0xFE, the application-specific class.
+pub const DFU_INTERFACE_CLASS = 0xFE
+// bInterfaceSubClass for DFU: 0x01.
+pub const DFU_INTERFACE_SUBCLASS = 0x01
+// bInterfaceProtocol 0x01: run-time mode — this is an application with
+// a DFU interface, and only DETACH and GETSTATUS work.
+pub const DFU_RUNTIME_PROTOCOL = 0x01
+// bInterfaceProtocol 0x02: DFU mode — this is the bootloader.
+pub const DFU_MODE_PROTOCOL = 0x02
+
+// bDescriptorType for the DFU functional descriptor: 0x21.
+pub const DFU_FUNCTIONAL_DESC = 0x21
+// How many bytes it occupies: 9.
+pub const DFU_FUNCTIONAL_LEN = 9
+
+// ── The functional descriptor ────────────────────────────────────────
+
+// What a device tells a host about how it can be updated.
+pub @value
+struct DfuFunctional
+    // `DFU_ATTR_*` bits from `dfustate`.
+    attributes: Int
+    // wDetachTimeOut: how many milliseconds the device will wait for a
+    // USB reset after DFU_DETACH before giving up and carrying on.
+    detach_timeout_ms: Int
+    // wTransferSize: the most bytes a DNLOAD may carry.  The number a
+    // host reads before it chooses a block size, and the number a
+    // device must not declare larger than its staging buffer.
+    transfer_size: Int
+    // bcdDFUVersion: 0x0110 for DFU 1.1, 0x011A for DfuSe.
+    bcd_dfu: Int
+
+// Build a functional descriptor.
+//
+// ```novo
+// use dfuusb
+// use dfustate
+//
+// fn main() [io]
+//     let f = dfuusb.functional(dfustate.DFU_ATTR_CAN_DNLOAD, 5000, 64, 0x0110)
+//     println("${dfuusb.transfer_size(f)}")   // 64
+// ```
+pub fn functional(attributes: Int, detach_timeout_ms: Int, transfer_size: Int,
+                  bcd_dfu: Int) -> DfuFunctional []
+    todo("dfu-nv.dfuusb.functional")
+
+// The attribute bits.
+pub fn functional_attributes(f: DfuFunctional) -> Int []
+    todo("dfu-nv.dfuusb.functional_attributes")
+
+// wDetachTimeOut.
+pub fn detach_timeout_ms(f: DfuFunctional) -> Int []
+    todo("dfu-nv.dfuusb.detach_timeout_ms")
+
+// wTransferSize.
+pub fn transfer_size(f: DfuFunctional) -> Int []
+    todo("dfu-nv.dfuusb.transfer_size")
+
+// bcdDFUVersion.
+pub fn bcd_dfu(f: DfuFunctional) -> Int []
+    todo("dfu-nv.dfuusb.bcd_dfu")
+
+// Whether the device declares the DfuSe extensions.
+pub fn is_dfuse(f: DfuFunctional) -> Bool []
+    todo("dfu-nv.dfuusb.is_dfuse")
+
+// The `i`-th of the nine wire bytes.
+//
+// ```novo
+// use dfuusb
+//
+// fn main() [io]
+//     let f = dfuusb.functional(0x01, 5000, 64, 0x0110)
+//     println("${dfuusb.functional_byte(f, 1)}")   // 33, the descriptor type
+// ```
+pub fn functional_byte(f: DfuFunctional, i: Int) -> Int []
+    todo("dfu-nv.dfuusb.functional_byte")
+
+// Decode a functional descriptor from the nine bytes at `off`.
+pub fn functional_decode(buf: [u8], off: Int) -> DfuFunctional []
+    todo("dfu-nv.dfuusb.functional_decode")
+
+// Why a functional descriptor would not work, or nothing, against a
+// device whose staging buffer holds `buffer_len` bytes.
+//
+// A `wTransferSize` larger than the buffer is the one that matters: it
+// is a promise the device cannot keep, the host believes it, and the
+// overrun happens on the first block.
+pub fn check_functional(f: DfuFunctional, buffer_len: Int) -> ?DfuError []
+    todo("dfu-nv.dfuusb.check_functional")
+
+// The interface descriptor for a DFU interface in the given mode.
+//
+// `protocol` is `DFU_RUNTIME_PROTOCOL` or `DFU_MODE_PROTOCOL`, and it
+// is the byte a host reads to know whether it is talking to an
+// application or a bootloader.
+pub fn dfu_interface_desc(interface_number: Int, alternate: Int, protocol: Int,
+                          i_interface: Int) -> UsbInterfaceDesc []
+    todo("dfu-nv.dfuusb.dfu_interface_desc")
+
+// How many bytes a DFU function adds to a configuration: the interface
+// descriptor plus the functional one, and no endpoints at all.
+//
+// DFU USES ENDPOINT 0 AND NOTHING ELSE, which is why a bootloader fits
+// in a few kilobytes: there is no bulk endpoint to configure and no
+// data toggle to get wrong.  It is also why a transfer is slow, and
+// why `wTransferSize` matters as much as it does.
+//
+// ```novo
+// use dfuusb
+//
+// fn main() [io]
+//     println("${dfuusb.dfu_total_len()}")   // 18
+// ```
+pub fn dfu_total_len() -> Int []
+    todo("dfu-nv.dfuusb.dfu_total_len")
+
+// ── The class requests as control transfers ──────────────────────────
+
+// bmRequestType for a DFU request in the host-to-device direction:
+// 0x21, a class request to an interface.
+pub const DFU_REQ_TYPE_OUT = 0x21
+// bmRequestType for the device-to-host direction: 0xA1.
+pub const DFU_REQ_TYPE_IN = 0xA1
+
+// The setup packet for a DFU request.
+//
+// `value` is the block number for DNLOAD and UPLOAD and the detach
+// timeout for DETACH; `interface` is the DFU interface's number, which
+// is 0 on almost every device and is a field because "almost" is not
+// "every".
+//
+// ```novo
+// use dfuusb
+// use dfustate
+// use usbctl
+//
+// fn main() [io]
+//     let s = dfuusb.setup_for(dfustate.DFU_REQ_GETSTATUS, 0, 0, 6)
+//     println("${usbctl.setup_request(s)}")   // 3
+// ```
+pub fn setup_for(request: Int, value: Int, interface: Int, len: Int) -> UsbSetup []
+    todo("dfu-nv.dfuusb.setup_for")
+
+// The DFU request a setup packet carries, or -1 when it is not a DFU
+// request at all.
+//
+// The device-side direction: a class request arrives at the control
+// endpoint and this says whether it is ours.
+//
+// ```novo
+// use dfuusb
+// use usbctl
+//
+// fn main() [io]
+//     let s = usbctl.setup(0xA1, 3, 0, 0, 6)
+//     println("${dfuusb.request_of(s)}")   // 3, GETSTATUS
+// ```
+pub fn request_of(s: UsbSetup) -> Int []
+    todo("dfu-nv.dfuusb.request_of")
+
+// The block number a DNLOAD or UPLOAD setup packet carries.
+pub fn block_of(s: UsbSetup) -> Int []
+    todo("dfu-nv.dfuusb.block_of")
+
+// Whether a setup packet is a DFU class request at all.
+pub fn is_dfu_request(s: UsbSetup) -> Bool []
+    todo("dfu-nv.dfuusb.is_dfu_request")
+
+// What a device in `state` should do with this setup packet.
+//
+// The bridge: the setup packet becomes a `dfustate` step, and the
+// device's driver performs the USB half.  One line, and it is here
+// rather than in `dfustate` so that the state machine stays free of
+// USB and the serial bootloader can drive it too.
+//
+// ```novo
+// use dfuusb
+// use dfustate
+// use usbctl
+//
+// fn main() [io]
+//     let s = usbctl.setup(0xA1, 3, 0, 0, 6)
+//     let st = dfuusb.step_for(dfustate.DFU_STATE_DFU_IDLE, s,
+//                              dfustate.status(0, 0, 2, 0))
+//     println("${dfustate.step_action(st)}")
+// ```
+pub fn step_for(state: Int, s: UsbSetup, reported: DfuStatus) -> DfuStep []
+    todo("dfu-nv.dfuusb.step_for")
+
+// ── The two enumerations ─────────────────────────────────────────────
+
+// Whether an interface descriptor describes a DFU interface.
+pub fn is_dfu_interface(d: UsbInterfaceDesc) -> Bool []
+    todo("dfu-nv.dfuusb.is_dfu_interface")
+
+// Whether an interface descriptor describes a device in run-time mode
+// — an application with DFU bolted on, where only DETACH and GETSTATUS
+// work.
+//
+// The question a host asks first, and the one that explains an
+// otherwise inexplicable stall: a DNLOAD to an application-mode device
+// is refused, and the way in is DETACH followed by a bus reset.
+pub fn is_runtime_mode(d: UsbInterfaceDesc) -> Bool []
+    todo("dfu-nv.dfuusb.is_runtime_mode")
+
+// Whether an interface descriptor describes a bootloader.
+pub fn is_dfu_mode(d: UsbInterfaceDesc) -> Bool []
+    todo("dfu-nv.dfuusb.is_dfu_mode")
+
+// How long a host should wait for a device to come back after DETACH,
+// given the functional descriptor it read.
+//
+// The device's own `wDetachTimeOut` plus the time a bus reset and a
+// re-enumeration take, which the specification does not state and
+// every implementation has to pick.  Naming it here rather than
+// leaving a bare sleep in a host loop is what makes it adjustable and
+// visible.
+pub fn detach_wait_ms(f: DfuFunctional) -> Int []
+    todo("dfu-nv.dfuusb.detach_wait_ms")

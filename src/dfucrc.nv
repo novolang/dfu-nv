@@ -1,0 +1,74 @@
+// dfucrc.nv — the one line that reaches crc-nv.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// A WHOLE MODULE FOR FOUR FUNCTIONS, for a reason that is about where
+// a dependency is NAMED rather than about what it does.  Every other
+// module in this package takes a CRC-32 as an `Int` the caller
+// supplies, which buys two things: a device with a CRC peripheral in
+// silicon passes its hardware's answer in and never executes a table
+// lookup, and `tests/embedded_probe.nv`'s module closure stays inside
+// this package's own sources.  This module is where the dependency
+// lives so that the others do not have to.
+//
+// CRC-32 AND NOT SOMETHING ELSE.  The IEEE 802.3 polynomial,
+// reflected, initialised and finalised with all ones — the one in
+// zlib, gzip, PNG, ZIP and Ethernet, the one crc-nv's `crc32()`
+// publishes, and the one every other firmware update tool computes.  A
+// format that chose a different CRC would be a format whose images no
+// existing tool could check, for no gain at all.  Its published check
+// value over the nine bytes `123456789` is 0xcbf43926, which
+// `DFU_CRC32_CHECK` carries so a test can assert the algorithm rather
+// than assume it.
+
+// The published check value of CRC-32 over the nine bytes
+// `123456789`: 0xcbf43926.
+//
+// The number that says the algorithm is the right one.  A value that
+// disagrees with another implementation's is almost always the wrong
+// variant rather than a wrong implementation, and this is what tells
+// them apart.
+pub const DFU_CRC32_CHECK = 0xCBF43926
+
+// The CRC-32 of a whole buffer.
+//
+// The host-side call: a firmware file is in memory and this is its
+// checksum.
+//
+// ```novo
+// use dfucrc
+// use std.bytes
+//
+// fn main() [io]
+//     println("${dfucrc.crc32(bytes.from_str("123456789"))}")
+//     // 3421780262, which is 0xcbf43926 — the published check value
+// ```
+pub fn crc32(data: Bytes) -> Int []
+    todo("dfu-nv.dfucrc.crc32")
+
+// The state a fresh CRC-32 starts from.
+//
+// Not a check value: the final xor has not been applied, so nothing
+// should compare against it.
+pub fn crc32_start() -> Int []
+    todo("dfu-nv.dfucrc.crc32_start")
+
+// One byte folded into a running state.
+//
+// The function a device uses: bytes arrive off a UART or out of a
+// control transfer one at a time, and this takes and answers an `Int`
+// with no buffer anywhere.
+pub fn crc32_step(state: Int, byte: Int) -> Int []
+    todo("dfu-nv.dfucrc.crc32_step")
+
+// A run of bytes folded into a running state.
+pub fn crc32_update(state: Int, data: Bytes) -> Int []
+    todo("dfu-nv.dfucrc.crc32_update")
+
+// The check value a running state has reached.
+//
+// A separate call from `crc32_update` because the final xor is what
+// turns a state into a check value — a caller that compared the
+// running state against a declared CRC would never match.
+pub fn crc32_finish(state: Int) -> Int []
+    todo("dfu-nv.dfucrc.crc32_finish")

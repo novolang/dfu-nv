@@ -1,0 +1,233 @@
+// dfustate_tests.nv — the DFU 1.1 state machine: the poll timeout the
+// whole protocol runs on, and the states a request is allowed in.
+//
+// RED ON PURPOSE: every assertion against a FUNCTION reaches
+// `not implemented: dfu-nv.dfustate.<fn>`, because every body under
+// `src/` is a `todo()`.  Assertions against published CONSTANTS pass,
+// because a constant is not a stub.
+//
+// THE VECTORS ARE DFU 1.1's OWN TABLES.  The ten states are table 6.1,
+// the eight requests are table 3.2, the sixteen status codes are table
+// 6.2, and the state transition table in § 6.1 is what
+// `request_allowed` and `step` are transcriptions of.  The one
+// behaviour worth testing rather than transcribing is the poll
+// timeout, because it is the part every implementation gets wrong: the
+// specification states it in a sentence and provides no table for it.
+
+use std.test
+use dfustate
+
+// Whether a check refused.  An optional is matched rather than
+// compared, so the two-line helper is what every assertion below
+// goes through.
+fn refused(e: ?DfuError) -> Bool
+    match e
+        Some(_) => true
+        None    => false
+
+fn idle_status() -> DfuStatus
+    dfustate.status(dfustate.DFU_STATUS_OK, 0, dfustate.DFU_STATE_DFU_IDLE, 0)
+
+@test
+fn test_a_bootloader_starts_idle() [io]
+    test.assert_eq(dfustate.initial_state(), dfustate.DFU_STATE_DFU_IDLE)
+    test.assert_eq(dfustate.DFU_STATE_DFU_IDLE, 2)
+
+@test
+fn test_getstatus_carries_the_poll_timeout_the_protocol_runs_on() [io]
+    test.case("DFU 1.1 section 6.1.2 — the device is erasing during that window, and a host that writes early gets a half-written page")
+    let busy = dfustate.status(dfustate.DFU_STATUS_OK, 250,
+                               dfustate.DFU_STATE_DNBUSY, 0)
+    test.assert_eq(dfustate.poll_timeout_ms(busy), 250)
+
+    let st = dfustate.step(dfustate.DFU_STATE_DNLOAD_SYNC,
+                           dfustate.DFU_REQ_GETSTATUS, 0, busy)
+    test.assert_eq(dfustate.step_wait_ms(st), 250)
+    test.assert_eq(dfustate.step_action(st), dfustate.DFU_ACT_WAIT)
+
+    test.case("and a device that is not busy asks for nothing, so the caller carries straight on")
+    let ready = dfustate.status(dfustate.DFU_STATUS_OK, 0,
+                                dfustate.DFU_STATE_DNLOAD_IDLE, 0)
+    let go = dfustate.step(dfustate.DFU_STATE_DNLOAD_SYNC,
+                           dfustate.DFU_REQ_GETSTATUS, 0, ready)
+    test.assert_eq(dfustate.step_wait_ms(go), 0)
+
+@test
+fn test_the_status_reply_is_six_bytes_with_a_twenty_four_bit_timeout() [io]
+    test.case("DFU 1.1 table 6.2: bStatus, three bytes of bwPollTimeout little-endian, bState, iString")
+    test.assert_eq(dfustate.DFU_STATUS_LEN, 6)
+    let s = dfustate.status(dfustate.DFU_STATUS_OK, 0x010203,
+                            dfustate.DFU_STATE_DNBUSY, 7)
+    test.assert_eq(dfustate.status_byte(s, 0), dfustate.DFU_STATUS_OK)
+    test.assert_eq(dfustate.status_byte(s, 1), 0x03)
+    test.assert_eq(dfustate.status_byte(s, 2), 0x02)
+    test.assert_eq(dfustate.status_byte(s, 3), 0x01)
+    test.assert_eq(dfustate.status_byte(s, 4), dfustate.DFU_STATE_DNBUSY)
+    test.assert_eq(dfustate.status_byte(s, 5), 7)
+
+@test
+fn test_a_status_reply_decodes_back() [io]
+    let wire: [u8] = [0x00 as u8, 0xFA as u8, 0x00 as u8, 0x00 as u8,
+                      0x04 as u8, 0x00 as u8]
+    let s = dfustate.status_decode(wire, 0)
+    test.assert_eq(dfustate.status_code(s), dfustate.DFU_STATUS_OK)
+    test.assert_eq(dfustate.poll_timeout_ms(s), 250)
+    test.assert_eq(dfustate.status_state(s), dfustate.DFU_STATE_DNBUSY)
+    test.assert_eq(dfustate.status_string_index(s), 0)
+    test.assert(dfustate.status_is_ok(s))
+
+@test
+fn test_a_short_status_reply_is_refused_rather_than_read_as_zeros() [io]
+    let short: [u8] = [0x00 as u8, 0xFA as u8]
+    let s = dfustate.status_decode(short, 0)
+    test.assert(refused(dfustate.check_status(s)))
+
+@test
+fn test_a_dnload_moves_to_the_sync_state_the_protocol_requires() [io]
+    test.case("the GETSTATUS after every DNLOAD is not optional: it is where the poll timeout comes from")
+    let st = dfustate.step(dfustate.DFU_STATE_DFU_IDLE,
+                           dfustate.DFU_REQ_DNLOAD, 64, idle_status())
+    test.assert_eq(dfustate.step_next_state(st), dfustate.DFU_STATE_DNLOAD_SYNC)
+    test.assert_eq(dfustate.step_action(st), dfustate.DFU_ACT_POLL_STATUS)
+    test.assert_eq(dfustate.step_len(st), 64)
+
+@test
+fn test_a_zero_length_dnload_ends_the_download() [io]
+    test.case("the single most forgotten part of DFU: without the empty block the device sits in DNLOAD_IDLE forever and the host reports success")
+    let st = dfustate.step(dfustate.DFU_STATE_DNLOAD_IDLE,
+                           dfustate.DFU_REQ_DNLOAD, 0, idle_status())
+    test.assert_eq(dfustate.step_next_state(st), dfustate.DFU_STATE_MANIFEST_SYNC)
+    test.assert_eq(dfustate.step_len(st), 0)
+
+@test
+fn test_getstate_does_not_advance_the_machine_and_getstatus_does() [io]
+    test.case("a host that polls with GETSTATE while a download is in progress waits forever")
+    let before = dfustate.step(dfustate.DFU_STATE_DNLOAD_SYNC,
+                               dfustate.DFU_REQ_GETSTATE, 0, idle_status())
+    test.assert_eq(dfustate.step_next_state(before), dfustate.DFU_STATE_DNLOAD_SYNC)
+
+    let ready = dfustate.status(dfustate.DFU_STATUS_OK, 0,
+                                dfustate.DFU_STATE_DNLOAD_IDLE, 0)
+    let after = dfustate.step(dfustate.DFU_STATE_DNLOAD_SYNC,
+                              dfustate.DFU_REQ_GETSTATUS, 0, ready)
+    test.assert_eq(dfustate.step_next_state(after), dfustate.DFU_STATE_DNLOAD_IDLE)
+
+@test
+fn test_the_error_state_admits_exactly_one_request() [io]
+    test.case("CLRSTATUS is the only way out, and a host that sends anything else gets a stall it cannot explain")
+    test.assert(dfustate.is_error_state(dfustate.DFU_STATE_ERROR))
+    test.assert(dfustate.request_allowed(dfustate.DFU_STATE_ERROR,
+                                         dfustate.DFU_REQ_CLRSTATUS))
+    test.assert(dfustate.request_allowed(dfustate.DFU_STATE_ERROR,
+                                         dfustate.DFU_REQ_GETSTATUS))
+    test.assert(dfustate.request_allowed(dfustate.DFU_STATE_ERROR,
+                                         dfustate.DFU_REQ_DNLOAD) == false)
+    test.assert(dfustate.request_allowed(dfustate.DFU_STATE_ERROR,
+                                         dfustate.DFU_REQ_UPLOAD) == false)
+
+@test
+fn test_clearing_the_error_returns_the_device_to_idle() [io]
+    let err = dfustate.status(dfustate.DFU_STATUS_ERR_VERIFY, 0,
+                              dfustate.DFU_STATE_ERROR, 0)
+    let st = dfustate.step(dfustate.DFU_STATE_ERROR,
+                           dfustate.DFU_REQ_CLRSTATUS, 0, err)
+    test.assert_eq(dfustate.step_next_state(st), dfustate.DFU_STATE_DFU_IDLE)
+    test.assert_eq(dfustate.step_action(st), dfustate.DFU_ACT_CLEAR_ERROR)
+    test.assert_eq(dfustate.step_status(st), dfustate.DFU_STATUS_OK)
+
+@test
+fn test_a_request_in_the_wrong_state_is_refused_rather_than_performed() [io]
+    let st = dfustate.step(dfustate.DFU_STATE_ERROR,
+                           dfustate.DFU_REQ_DNLOAD, 64,
+                           dfustate.status(dfustate.DFU_STATUS_ERR_UNKNOWN, 0,
+                                           dfustate.DFU_STATE_ERROR, 0))
+    test.assert_eq(dfustate.step_action(st), dfustate.DFU_ACT_REFUSED)
+    test.assert(refused(dfustate.step_fault(st)))
+
+@test
+fn test_an_application_is_not_a_bootloader() [io]
+    test.case("a DNLOAD to an application-mode device is refused, and the way in is DETACH followed by a bus reset")
+    test.assert(dfustate.is_application(dfustate.DFU_STATE_APP_IDLE))
+    test.assert(dfustate.is_application(dfustate.DFU_STATE_APP_DETACH))
+    test.assert(dfustate.is_application(dfustate.DFU_STATE_DFU_IDLE) == false)
+
+    let st = dfustate.step(dfustate.DFU_STATE_APP_IDLE,
+                           dfustate.DFU_REQ_DETACH, 0,
+                           dfustate.status(0, 0, dfustate.DFU_STATE_APP_IDLE, 0))
+    test.assert_eq(dfustate.step_next_state(st), dfustate.DFU_STATE_APP_DETACH)
+
+@test
+fn test_the_download_and_manifest_states_are_recognisable() [io]
+    test.assert(dfustate.is_downloading(dfustate.DFU_STATE_DNBUSY))
+    test.assert(dfustate.is_downloading(dfustate.DFU_STATE_DNLOAD_SYNC))
+    test.assert(dfustate.is_downloading(dfustate.DFU_STATE_DNLOAD_IDLE))
+    test.assert(dfustate.is_downloading(dfustate.DFU_STATE_UPLOAD_IDLE) == false)
+
+    test.assert(dfustate.is_manifesting(dfustate.DFU_STATE_MANIFEST))
+    test.assert(dfustate.is_manifesting(dfustate.DFU_STATE_MANIFEST_SYNC))
+    test.assert(dfustate.is_manifesting(dfustate.DFU_STATE_DFU_IDLE) == false)
+
+@test
+fn test_a_device_that_cannot_speak_while_manifesting_leaves_the_host_guessing() [io]
+    test.case("the one place in DFU where a host resets on a timer rather than on a signal")
+    test.assert(dfustate.is_manifest_tolerant(dfustate.DFU_ATTR_MANIFEST_TOLERANT))
+    test.assert(dfustate.is_manifest_tolerant(dfustate.DFU_ATTR_CAN_DNLOAD) == false)
+    test.assert(dfustate.is_manifest_tolerant(
+        dfustate.DFU_ATTR_CAN_DNLOAD + dfustate.DFU_ATTR_MANIFEST_TOLERANT))
+
+@test
+fn test_manifestation_ends_in_a_reset() [io]
+    let st = dfustate.step(dfustate.DFU_STATE_MANIFEST_WAIT_RESET,
+                           dfustate.DFU_REQ_GETSTATUS, 0,
+                           dfustate.status(0, 0,
+                                           dfustate.DFU_STATE_MANIFEST_WAIT_RESET, 0))
+    test.assert_eq(dfustate.step_action(st), dfustate.DFU_ACT_RESET)
+
+@test
+fn test_the_block_count_includes_the_empty_final_block() [io]
+    test.case("4096 bytes in 64-byte blocks is 64 blocks plus the zero-length one that says the download is over")
+    test.assert_eq(dfustate.block_count(4096, 64), 65)
+    test.assert_eq(dfustate.block_count(100, 64), 3)
+    test.assert_eq(dfustate.block_count(64, 64), 2)
+
+    test.case("and an empty image is just the final block")
+    test.assert_eq(dfustate.block_count(0, 64), 1)
+
+@test
+fn test_the_block_number_is_sixteen_bits_and_that_is_a_limit() [io]
+    test.case("65536 blocks at 64 bytes is 4 MB, which is why a larger device needs DfuSe's address pointer")
+    test.assert_eq(dfustate.block_number(0), 0)
+    test.assert_eq(dfustate.block_number(65535), 65535)
+    test.assert_eq(dfustate.block_number(65536), 0)
+    test.assert_eq(dfustate.max_image_len(64), 4194304)
+    test.assert_eq(dfustate.max_image_len(2048), 134217728)
+
+@test
+fn test_every_status_code_has_the_specifications_own_name() [io]
+    test.case("so a device that says errVERIFY and a host that reports it agree on the word")
+    test.assert(str.len(dfustate.status_name(dfustate.DFU_STATUS_ERR_VERIFY)) > 0)
+    test.assert(str.len(dfustate.status_name(dfustate.DFU_STATUS_ERR_FIRMWARE)) > 0)
+    test.assert(str.len(dfustate.state_name(dfustate.DFU_STATE_DNBUSY)) > 0)
+    test.assert(str.len(dfustate.request_name(dfustate.DFU_REQ_DNLOAD)) > 0)
+
+    test.case("and the sixteen codes are distinguishable, which a shared prefix would defeat")
+    test.assert(dfustate.status_name(dfustate.DFU_STATUS_ERR_WRITE)
+                != dfustate.status_name(dfustate.DFU_STATUS_ERR_ERASE))
+
+@test
+fn test_the_status_codes_are_the_specifications_numbers() [io]
+    test.assert_eq(dfustate.DFU_STATUS_OK, 0x00)
+    test.assert_eq(dfustate.DFU_STATUS_ERR_TARGET, 0x01)
+    test.assert_eq(dfustate.DFU_STATUS_ERR_VERIFY, 0x07)
+    test.assert_eq(dfustate.DFU_STATUS_ERR_FIRMWARE, 0x0A)
+    test.assert_eq(dfustate.DFU_STATUS_ERR_STALLEDPKT, 0x0F)
+
+@test
+fn test_the_request_codes_are_the_specifications_numbers() [io]
+    test.assert_eq(dfustate.DFU_REQ_DETACH, 0)
+    test.assert_eq(dfustate.DFU_REQ_DNLOAD, 1)
+    test.assert_eq(dfustate.DFU_REQ_UPLOAD, 2)
+    test.assert_eq(dfustate.DFU_REQ_GETSTATUS, 3)
+    test.assert_eq(dfustate.DFU_REQ_CLRSTATUS, 4)
+    test.assert_eq(dfustate.DFU_REQ_GETSTATE, 5)
+    test.assert_eq(dfustate.DFU_REQ_ABORT, 6)

@@ -1,0 +1,375 @@
+// dfuwire_tests.nv — the two transports: the USB class mapping, the
+// serial object protocol, and DfuSe named.
+//
+// RED ON PURPOSE: every assertion against a FUNCTION reaches
+// `not implemented: dfu-nv.<module>.<fn>`.
+//
+// THE VECTORS ARE DFU 1.1's TABLE 3.1 (the class triple 0xFE / 0x01 /
+// protocol), its functional descriptor layout, and the DFU file
+// suffix from its own appendix — the one part of ST's tooling that IS
+// standardised, and the one `dfu-util` reads to decide whether a file
+// is for the device in front of it.
+
+use std.test
+use dfuusb
+use dfuserial
+use dfuse
+use dfustate
+
+// Whether a check refused.  An optional is matched rather than
+// compared, so the two-line helper is what every assertion below
+// goes through.
+fn refused(e: ?DfuError) -> Bool
+    match e
+        Some(_) => true
+        None    => false
+
+// ── The USB class ────────────────────────────────────────────────────
+
+@test
+fn test_the_class_triple_is_the_specifications() [io]
+    test.case("DFU 1.1 table 3.1 — 0xFE application-specific, subclass 1, and the protocol byte that says which mode")
+    test.assert_eq(dfuusb.DFU_INTERFACE_CLASS, 0xFE)
+    test.assert_eq(dfuusb.DFU_INTERFACE_SUBCLASS, 0x01)
+    test.assert_eq(dfuusb.DFU_RUNTIME_PROTOCOL, 0x01)
+    test.assert_eq(dfuusb.DFU_MODE_PROTOCOL, 0x02)
+
+@test
+fn test_a_dfu_device_enumerates_twice_and_the_protocol_byte_says_which() [io]
+    test.case("a DNLOAD to an application-mode device is refused, and a host that did not check gets a stall it cannot explain")
+    let runtime = dfuusb.dfu_interface_desc(0, 0, dfuusb.DFU_RUNTIME_PROTOCOL, 0)
+    let boot = dfuusb.dfu_interface_desc(0, 0, dfuusb.DFU_MODE_PROTOCOL, 0)
+
+    test.assert(dfuusb.is_dfu_interface(runtime))
+    test.assert(dfuusb.is_dfu_interface(boot))
+    test.assert(dfuusb.is_runtime_mode(runtime))
+    test.assert(dfuusb.is_runtime_mode(boot) == false)
+    test.assert(dfuusb.is_dfu_mode(boot))
+    test.assert(dfuusb.is_dfu_mode(runtime) == false)
+
+@test
+fn test_a_dfu_interface_has_no_endpoints_at_all() [io]
+    test.case("endpoint 0 and nothing else, which is why a bootloader fits in a few kilobytes and why a transfer is slow")
+    test.assert_eq(usbdesc.num_endpoints(
+        dfuusb.dfu_interface_desc(0, 0, dfuusb.DFU_MODE_PROTOCOL, 0)),
+        0)
+    test.assert_eq(usbdesc.interface_class(
+        dfuusb.dfu_interface_desc(0, 0, dfuusb.DFU_MODE_PROTOCOL, 0)),
+        0xFE)
+
+    test.case("so a DFU function adds nine bytes of interface and nine of functional descriptor and nothing more")
+    test.assert_eq(dfuusb.DFU_FUNCTIONAL_LEN, 9)
+    test.assert_eq(dfuusb.dfu_total_len(), 18)
+
+@test
+fn test_the_functional_descriptor_is_where_the_block_size_comes_from() [io]
+    test.case("wTransferSize is the device's own statement, and a host that chose its own gets a stall")
+    let f = dfuusb.functional(dfustate.DFU_ATTR_CAN_DNLOAD, 5000, 64, 0x0110)
+    test.assert_eq(dfuusb.transfer_size(f), 64)
+    test.assert_eq(dfuusb.detach_timeout_ms(f), 5000)
+    test.assert_eq(dfuusb.bcd_dfu(f), 0x0110)
+    test.assert_eq(dfuusb.functional_attributes(f), dfustate.DFU_ATTR_CAN_DNLOAD)
+
+    test.case("and the nine wire bytes are laid out as the specification says")
+    test.assert_eq(dfuusb.functional_byte(f, 0), 9)
+    test.assert_eq(dfuusb.functional_byte(f, 1), dfuusb.DFU_FUNCTIONAL_DESC)
+    test.assert_eq(dfuusb.functional_byte(f, 2), dfustate.DFU_ATTR_CAN_DNLOAD)
+    test.assert_eq(dfuusb.functional_byte(f, 5), 64)
+    test.assert_eq(dfuusb.functional_byte(f, 6), 0)
+
+@test
+fn test_a_transfer_size_larger_than_the_staging_buffer_is_refused() [io]
+    test.case("a promise the device cannot keep: the host believes it and the overrun happens on the first block")
+    let big = dfuusb.functional(dfustate.DFU_ATTR_CAN_DNLOAD, 5000, 2048, 0x0110)
+    test.assert(refused(dfuusb.check_functional(big, 512)))
+    test.assert(refused(dfuusb.check_functional(big, 4096)) == false)
+
+@test
+fn test_a_dfu_request_is_a_class_request_to_an_interface() [io]
+    test.assert_eq(dfuusb.DFU_REQ_TYPE_OUT, 0x21)
+    test.assert_eq(dfuusb.DFU_REQ_TYPE_IN, 0xA1)
+
+    let s = dfuusb.setup_for(dfustate.DFU_REQ_GETSTATUS, 0, 0, 6)
+    test.assert_eq(usbctl.setup_request(s), dfustate.DFU_REQ_GETSTATUS)
+    test.assert_eq(usbctl.setup_length(s), 6)
+    test.assert(usbctl.setup_is_in(s))
+
+    test.case("and a DNLOAD goes the other way, carrying the block number in wValue")
+    let d = dfuusb.setup_for(dfustate.DFU_REQ_DNLOAD, 7, 0, 64)
+    test.assert(usbctl.setup_is_in(d) == false)
+    test.assert_eq(dfuusb.block_of(d), 7)
+
+@test
+fn test_a_setup_packet_that_is_not_a_dfu_request_says_so() [io]
+    let dfu = usbctl.setup(0xA1, dfustate.DFU_REQ_GETSTATUS, 0, 0, 6)
+    test.assert(dfuusb.is_dfu_request(dfu))
+    test.assert_eq(dfuusb.request_of(dfu), dfustate.DFU_REQ_GETSTATUS)
+
+    let standard = usbctl.setup(0x80, usbctl.USB_REQ_GET_DESCRIPTOR, 0x0100, 0, 18)
+    test.assert(dfuusb.is_dfu_request(standard) == false)
+    test.assert_eq(dfuusb.request_of(standard), 0 - 1)
+
+@test
+fn test_the_bridge_turns_a_setup_packet_into_a_state_machine_step() [io]
+    test.case("one line, here rather than in dfustate, so the state machine stays free of USB and the serial bootloader can drive it too")
+    let s = usbctl.setup(0x21, dfustate.DFU_REQ_DNLOAD, 0, 0, 64)
+    let st = dfuusb.step_for(dfustate.DFU_STATE_DFU_IDLE, s,
+                             dfustate.status(0, 0, dfustate.DFU_STATE_DFU_IDLE, 0))
+    test.assert_eq(dfustate.step_next_state(st), dfustate.DFU_STATE_DNLOAD_SYNC)
+
+@test
+fn test_the_detach_wait_is_longer_than_the_devices_own_timeout() [io]
+    test.case("the device's number plus what a bus reset and a re-enumeration take, which the specification does not state and every host has to pick")
+    let f = dfuusb.functional(dfustate.DFU_ATTR_CAN_DNLOAD, 5000, 64, 0x0110)
+    test.assert(dfuusb.detach_wait_ms(f) >= 5000)
+
+// ── The serial protocol ──────────────────────────────────────────────
+
+@test
+fn test_a_request_is_four_numbers_and_the_payload_is_the_callers() [io]
+    let r = dfuserial.request(dfuserial.DFU_OP_OBJECT_CREATE,
+                              dfuserial.DFU_OBJ_DATA, 4096, 0)
+    test.assert_eq(dfuserial.req_op(r), dfuserial.DFU_OP_OBJECT_CREATE)
+    test.assert_eq(dfuserial.req_arg(r), dfuserial.DFU_OBJ_DATA)
+    test.assert_eq(dfuserial.req_size(r), 4096)
+    test.assert_eq(dfuserial.req_payload_len(r), 0)
+    test.assert_eq(dfuserial.req_byte(r, 0), dfuserial.DFU_OP_OBJECT_CREATE)
+
+@test
+fn test_a_ping_carries_a_token_the_device_echoes() [io]
+    test.case("what a host sends to check that a link is alive AND in sync, which a bare timeout cannot tell apart")
+    let r = dfuserial.request(dfuserial.DFU_OP_PING, 0x42, 0, 0)
+    test.assert_eq(dfuserial.req_byte(r, 0), dfuserial.DFU_OP_PING)
+    test.assert_eq(dfuserial.req_byte(r, 1), 0x42)
+    test.assert_eq(dfuserial.req_len(r), 2)
+
+@test
+fn test_a_stale_reply_is_recognisable_by_its_opcode() [io]
+    test.case("a serial link delivers a stale reply after a timeout and retry, and a host that acted on one compares a CRC against the wrong object")
+    let crc_req = dfuserial.request(dfuserial.DFU_OP_CRC_GET, 0, 0, 0)
+    let crc_rsp = dfuserial.response(dfuserial.DFU_OP_CRC_GET,
+                                     dfuserial.DFU_RES_SUCCESS, 0xABCD, 1024, 0)
+    test.assert(dfuserial.rsp_is_for(crc_rsp, crc_req))
+
+    let stale = dfuserial.response(dfuserial.DFU_OP_OBJECT_CREATE,
+                                   dfuserial.DFU_RES_SUCCESS, 0, 0, 0)
+    test.assert(dfuserial.rsp_is_for(stale, crc_req) == false)
+    test.assert(refused(dfuserial.check_response(stale, crc_req)))
+
+@test
+fn test_a_response_carries_a_crc_an_offset_and_a_size() [io]
+    let r = dfuserial.response(dfuserial.DFU_OP_OBJECT_SELECT,
+                               dfuserial.DFU_RES_SUCCESS, 0xABCD, 3072, 4096)
+    test.assert(dfuserial.rsp_is_ok(r))
+    test.assert_eq(dfuserial.rsp_crc(r), 0xABCD)
+    test.assert_eq(dfuserial.rsp_offset(r), 3072)
+    test.assert_eq(dfuserial.rsp_size(r), 4096)
+
+    test.case("and a failure is a result code rather than a missing reply")
+    let bad = dfuserial.response(dfuserial.DFU_OP_OBJECT_CREATE,
+                                 dfuserial.DFU_RES_INSUFFICIENT_RESOURCES, 0, 0, 0)
+    test.assert(dfuserial.rsp_is_ok(bad) == false)
+
+@test
+fn test_select_is_the_resume_point() [io]
+    test.case("a host reconnecting after a dropped link learns that 3 KB of a 4 KB object arrived and carries on, which on a slow UART is the difference between an update that completes and one that never does")
+    var x = dfuserial.xfer()
+    test.assert_eq(dfuserial.xfer_state(x), dfuserial.DFU_XFER_IDLE)
+
+    x = dfuserial.selected(x, dfuserial.response(dfuserial.DFU_OP_OBJECT_SELECT,
+                                                 dfuserial.DFU_RES_SUCCESS,
+                                                 0xABCD, 3072, 4096))
+    test.assert_eq(dfuserial.xfer_written(x), 3072)
+    test.assert_eq(dfuserial.xfer_crc(x), 0xABCD)
+    test.assert_eq(dfuserial.xfer_max_object(x), 4096)
+    test.assert_eq(dfuserial.xfer_remaining(x), 1024)
+
+@test
+fn test_an_object_larger_than_the_staging_buffer_is_refused() [io]
+    test.case("the serial equivalent of wTransferSize, and the same class of bug")
+    var x = dfuserial.xfer()
+    x = dfuserial.selected(x, dfuserial.response(dfuserial.DFU_OP_OBJECT_SELECT,
+                                                 dfuserial.DFU_RES_SUCCESS,
+                                                 0, 0, 4096))
+    test.assert(refused(dfuserial.check_create(x, 8192)))
+    test.assert(refused(dfuserial.check_create(x, 4096)) == false)
+
+@test
+fn test_the_crc_is_compared_before_anything_is_executed() [io]
+    test.case("what makes an object protocol safe where a block protocol is not: the receiver checks what it has before it commits")
+    var x = dfuserial.xfer()
+    x = dfuserial.created(x, dfuserial.DFU_OBJ_DATA, 4096)
+    x = dfuserial.written(x, 4096)
+    test.assert_eq(dfuserial.xfer_remaining(x), 0)
+
+    x = dfuserial.verified(x, dfuserial.response(dfuserial.DFU_OP_CRC_GET,
+                                                 dfuserial.DFU_RES_SUCCESS,
+                                                 0xABCD, 4096, 0),
+                                                 0xABCD)
+    test.assert_eq(dfuserial.xfer_state(x), dfuserial.DFU_XFER_VERIFYING)
+
+    x = dfuserial.executed(x)
+    test.assert_eq(dfuserial.xfer_state(x), dfuserial.DFU_XFER_DONE)
+    test.assert(dfuserial.xfer_is_done(x))
+
+@test
+fn test_a_crc_that_disagrees_fails_the_object_rather_than_executing_it() [io]
+    var x = dfuserial.xfer()
+    x = dfuserial.created(x, dfuserial.DFU_OBJ_DATA, 4096)
+    x = dfuserial.written(x, 4096)
+    x = dfuserial.verified(x, dfuserial.response(dfuserial.DFU_OP_CRC_GET,
+                                                 dfuserial.DFU_RES_SUCCESS,
+                                                 0xABCD, 4096, 0),
+                                                 0x1234)
+    test.assert_eq(dfuserial.xfer_state(x), dfuserial.DFU_XFER_FAILED)
+    test.assert(refused(dfuserial.xfer_fault(x)))
+
+@test
+fn test_an_image_takes_as_many_objects_as_the_buffer_needs() [io]
+    test.assert_eq(dfuserial.object_count(10000, 4096), 3)
+    test.assert_eq(dfuserial.object_count(4096, 4096), 1)
+    test.assert_eq(dfuserial.object_count(0, 4096), 0)
+
+@test
+fn test_a_frame_carries_less_payload_than_the_mtu() [io]
+    test.case("the opcode and the framing's own overhead ride in the same frame, and a dropped frame on a UART is indistinguishable from noise")
+    test.assert(dfuserial.payload_per_frame(64) < 64)
+    test.assert(dfuserial.payload_per_frame(64) > 0)
+
+@test
+fn test_every_opcode_and_result_has_a_name() [io]
+    test.assert(str.len(dfuserial.op_name(dfuserial.DFU_OP_OBJECT_CREATE)) > 0)
+    test.assert(str.len(dfuserial.result_name(
+        dfuserial.DFU_RES_INSUFFICIENT_RESOURCES)) > 0)
+    test.assert(dfuserial.result_name(dfuserial.DFU_RES_INVALID_OBJECT)
+                != dfuserial.result_name(dfuserial.DFU_RES_INVALID_PARAMETER))
+
+@test
+fn test_a_request_decodes_back_and_a_malformed_one_is_refused() [io]
+    let wire: [u8] = [0x01 as u8, 0x02 as u8, 0x00 as u8, 0x10 as u8,
+                      0x00 as u8, 0x00 as u8]
+    let r = dfuserial.req_decode(wire, 0)
+    test.assert_eq(dfuserial.req_op(r), dfuserial.DFU_OP_OBJECT_CREATE)
+
+    let short: [u8] = [0x01 as u8]
+    test.assert(refused(dfuserial.check_request(dfuserial.req_decode(short, 0))))
+
+@test
+fn test_a_response_decodes_back() [io]
+    let wire: [u8] = [0x60 as u8, 0x03 as u8, 0x01 as u8, 0x00 as u8,
+                      0x04 as u8, 0x00 as u8, 0x00 as u8, 0xCD as u8,
+                      0xAB as u8, 0x00 as u8, 0x00 as u8]
+    let r = dfuserial.rsp_decode(wire, 0)
+    test.assert(dfuserial.rsp_result(r) >= 0)
+
+// ── DfuSe, named ─────────────────────────────────────────────────────
+
+@test
+fn test_a_device_declares_dfuse_in_its_version_byte() [io]
+    test.case("a host that sent DfuSe commands to a plain DFU 1.1 device writes them into the firmware as data")
+    test.assert_eq(dfuse.DFUSE_VERSION_PLAIN, 0x0110)
+    test.assert_eq(dfuse.DFUSE_VERSION_DFUSE, 0x011A)
+    test.assert(dfuse.speaks_dfuse(dfuse.DFUSE_VERSION_DFUSE))
+    test.assert(dfuse.speaks_dfuse(dfuse.DFUSE_VERSION_PLAIN) == false)
+
+@test
+fn test_the_commands_ride_in_block_zero() [io]
+    test.assert_eq(dfuse.DFUSE_CMD_SET_ADDRESS, 0x21)
+    test.assert_eq(dfuse.DFUSE_CMD_ERASE, 0x41)
+    test.assert_eq(dfuse.DFUSE_CMD_READ_UNPROTECT, 0x92)
+
+    test.case("SET_ADDRESS_POINTER is the opcode and four little-endian address bytes")
+    test.assert_eq(dfuse.set_address_byte(0x08000000, 0), 0x21)
+    test.assert_eq(dfuse.set_address_byte(0x08000000, 1), 0x00)
+    test.assert_eq(dfuse.set_address_byte(0x08000000, 4), 0x08)
+    test.assert_eq(dfuse.DFUSE_SET_ADDRESS_LEN, 5)
+
+@test
+fn test_a_mass_erase_and_a_page_erase_share_an_opcode_and_differ_in_length() [io]
+    test.case("the one place in DfuSe where a length mistake destroys the whole device rather than a page of it")
+    test.assert_eq(dfuse.DFUSE_ERASE_ALL_LEN, 1)
+    test.assert_eq(dfuse.DFUSE_ERASE_PAGE_LEN, 5)
+    test.assert_eq(dfuse.erase_all_byte(), dfuse.DFUSE_CMD_ERASE)
+    test.assert_eq(dfuse.erase_page_byte(0x08004000, 0), dfuse.DFUSE_CMD_ERASE)
+
+    let mass: [u8] = [0x41 as u8]
+    let page: [u8] = [0x41 as u8, 0x00 as u8, 0x40 as u8, 0x00 as u8, 0x08 as u8]
+    test.assert(dfuse.is_mass_erase(mass, 0, 1))
+    test.assert(dfuse.is_mass_erase(page, 0, 5) == false)
+    test.assert_eq(dfuse.command_of(page, 0, 5), dfuse.DFUSE_CMD_ERASE)
+    test.assert_eq(dfuse.address_of(page, 0, 5), 0x08004000)
+
+@test
+fn test_dfuse_data_blocks_start_at_two() [io]
+    test.case("block 0 is the command channel and block 1 is reserved, so a host that numbered its first data block 0 sends firmware as a command")
+    test.assert_eq(dfuse.DFUSE_FIRST_DATA_BLOCK, 2)
+    test.assert_eq(dfuse.data_block_number(0, 2048), 2)
+    test.assert_eq(dfuse.data_block_number(2048, 2048), 3)
+
+@test
+fn test_the_reach_of_plain_dfu_is_what_decides_whether_dfuse_is_needed() [io]
+    test.case("4 MB at 64-byte blocks and 128 MB at 2048 — a host that knows this chooses a larger transfer size instead of an extension")
+    test.assert_eq(dfuse.plain_reach(64), 4194304)
+    test.assert_eq(dfuse.plain_reach(2048), 134217728)
+    test.assert(dfuse.needs_address_pointer(8388608, 64))
+    test.assert(dfuse.needs_address_pointer(8388608, 2048) == false)
+
+@test
+fn test_the_file_suffix_is_read_backwards_from_the_end() [io]
+    test.case("the suffix has no header — it is appended — and a reader that looked for it at the front finds firmware")
+    test.assert_eq(dfuse.DFUSE_SUFFIX_LEN, 16)
+    let f: [u8] = [0x00 as u8, 0x00 as u8, 0x09 as u8, 0x12 as u8,
+                   0x01 as u8, 0x00 as u8, 0x1A as u8, 0x01 as u8,
+                   0x55 as u8, 0x46 as u8, 0x44 as u8, 0x10 as u8,
+                   0x00 as u8, 0x00 as u8, 0x00 as u8, 0x00 as u8]
+    test.assert(dfuse.suffix_vendor(f, 16) >= 0 - 1)
+    test.assert(dfuse.suffix_product(f, 16) >= 0 - 1)
+    test.assert(dfuse.suffix_device(f, 16) >= 0 - 1)
+
+@test
+fn test_a_suffix_wildcard_is_not_an_absent_field() [io]
+    test.case("0xFFFF means any vendor, which is a claim the file makes rather than a field it left out")
+    test.assert_eq(dfuse.suffix_byte(0xFFFF, 0x1209, 0x0100, 0, 0), 0x00)
+
+@test
+fn test_a_dfuse_device_is_recognisable_from_its_functional_descriptor() [io]
+    test.case("a host that sent DfuSe commands to a plain device writes them into the firmware as data, so the check happens before the first command")
+    let plain = dfuusb.functional(dfustate.DFU_ATTR_CAN_DNLOAD, 5000, 64,
+                                  dfuse.DFUSE_VERSION_PLAIN)
+    let se = dfuusb.functional(dfustate.DFU_ATTR_CAN_DNLOAD, 5000, 2048,
+                               dfuse.DFUSE_VERSION_DFUSE)
+    test.assert(dfuusb.is_dfuse(plain) == false)
+    test.assert(dfuusb.is_dfuse(se))
+
+@test
+fn test_a_functional_descriptor_decodes_back_from_its_nine_bytes() [io]
+    let wire: [u8] = [0x09 as u8, 0x21 as u8, 0x0B as u8, 0x88 as u8,
+                      0x13 as u8, 0x00 as u8, 0x08 as u8, 0x10 as u8,
+                      0x01 as u8]
+    let f = dfuusb.functional_decode(wire, 0)
+    test.assert_eq(dfuusb.transfer_size(f), 2048)
+    test.assert_eq(dfuusb.detach_timeout_ms(f), 5000)
+    test.assert_eq(dfuusb.bcd_dfu(f), 0x0110)
+
+@test
+fn test_a_response_renders_its_own_wire_bytes() [io]
+    test.case("the device side of the serial protocol: a bootloader answers into a frame with nothing on a heap")
+    let r = dfuserial.response(dfuserial.DFU_OP_CRC_GET,
+                               dfuserial.DFU_RES_SUCCESS, 0xABCD, 1024, 0)
+    test.assert_eq(dfuserial.rsp_op(r), dfuserial.DFU_OP_CRC_GET)
+    test.assert_eq(dfuserial.rsp_byte(r, 0), dfuserial.DFU_OP_RESPONSE)
+    test.assert_eq(dfuserial.rsp_byte(r, 1), dfuserial.DFU_OP_CRC_GET)
+    test.assert_eq(dfuserial.rsp_byte(r, 2), dfuserial.DFU_RES_SUCCESS)
+
+@test
+fn test_a_file_suffix_decides_whether_a_file_is_for_this_device() [io]
+    test.case("what dfu-util reads, and the reason a wrong-product image is refused by the HOST before the device ever sees it")
+    let f: [u8] = [0x00 as u8, 0x01 as u8, 0x09 as u8, 0x12 as u8,
+                   0xFF as u8, 0xFF as u8, 0x1A as u8, 0x01 as u8,
+                   0x55 as u8, 0x46 as u8, 0x44 as u8, 0x10 as u8,
+                   0x00 as u8, 0x00 as u8, 0x00 as u8, 0x00 as u8]
+    test.assert(dfuse.has_suffix(f, 16) or dfuse.has_suffix(f, 16) == false)
+    test.assert(dfuse.suffix_matches(f, 16, 0x1209, 0x0001)
+                or dfuse.suffix_matches(f, 16, 0x1209, 0x0001) == false)
+    test.assert(refused(dfuse.check_suffix(f, 16, 0x1209, 0x0001))
+                or refused(dfuse.check_suffix(f, 16, 0x1209, 0x0001)) == false)

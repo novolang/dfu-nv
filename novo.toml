@@ -1,0 +1,84 @@
+[package]
+name        = "dfu-nv"
+version     = "0.0.1"
+description = "Firmware update over USB and over serial: the USB DFU 1.1 class state machine with its requests and status codes, a signed image format with a CRC-32 and a signature slot the caller fills, the object-based serial bootloader protocol over frame-nv, and a host-side updater that drives either transport.  Interface only — every body is a todo()."
+license     = "Apache-2.0"
+
+# An INTERFACE release: every `pub fn` body is a `todo()`, so the
+# signatures and the effect rows are published and nothing is
+# implemented.  `novo pkg publish` recognises the shape and requires
+# both the draft stability and the 0.0.x version; the first
+# implementation is the 0.1.0 published over it.
+stability   = "draft"
+
+# `core`, with one host module named below.
+#
+# The plan placed the row at `host` because the updater is the visible
+# half.  The half that has to be RIGHT is the other one: a bootloader
+# is the last code on a device that cannot be updated remotely, so its
+# state machine and its image parser run on the device with no
+# allocator, no clock and no second chance.  The narrow layer is
+# declared and the wide module named — `docs/publishing.md` § A package
+# with a core and a host half — which is what makes the device claim in
+# `tests/embedded_probe.nv` a thing the audit BUILDS.
+layer       = "core"
+
+# `dfuhost` is the one module that performs: it reads the firmware file
+# and drives whichever transport the caller opened.  `[io]`, and
+# nothing else — the USB transfers and the serial writes are the
+# caller's transport, declared where that transport is.
+host_modules = ["dfuhost"]
+
+category    = "embedded"
+
+tags        = ["dfu", "firmware", "bootloader", "ota", "usb", "serial", "embedded", "crc32"]
+repository  = "https://github.com/novolang/dfu-nv"
+maintainers = ["novo-lang"]
+novo        = ">= 0.8.9"
+
+# A library: no `main`, so `novo pkg build` type-checks and
+# effect-checks every module under `src/` and writes no binary.
+
+[docs.pages]
+"README.md" = "A firmware update that cannot be half-applied"
+
+[dependencies]
+# usb-nv, by PATH while the two are developed together.
+#
+# `novo pkg publish` refuses a path dependency, `--dry-run` included,
+# and it is right to: a tarball carrying `../usb-nv` sends every
+# consumer to a directory that is not on their machine.  The line to
+# publish with is `usb-nv = "^0.0.1"`, and usb-nv has to be on the
+# registry first.
+#
+# What this buys is `dfuusb`: the DFU class is a USB interface with a
+# functional descriptor and six class requests, and writing those
+# against usb-nv's `UsbSetup` and `UsbInterfaceDesc` rather than
+# against raw integers is what stops the two packages from disagreeing
+# about a descriptor byte.  `dfustate` does NOT name a usb-nv type, on
+# purpose — the state machine is transport-independent and the serial
+# bootloader drives the same one.
+usb-nv = "^0.0.1"
+
+# crc-nv for the image's CRC-32.
+#
+# THE CHECK IS THE WHOLE POINT OF THE HEADER.  A firmware image that
+# arrives corrupt and is written anyway is a device that does not come
+# back, so the checksum is not an accessory here.  crc-nv publishes
+# CRC-32 with the IEEE 802.3 polynomial — the one in zlib, gzip, PNG
+# and ZIP, and the one every other DFU tool uses — table driven and
+# asserted against the published check value 0xcbf43926.
+#
+# It is named only by `dfucrc`, which is not in the device probe: the
+# probed modules take and answer a CRC as an `Int`, so a firmware that
+# has the value from its own hardware peripheral passes it in.
+crc-nv = "^0.1.4"
+
+# frame-nv for the serial transport's framing.
+#
+# The nRF52 serial bootloader is an object protocol over a
+# length-delimited, COBS-encoded, CRC-checked frame on a UART, which is
+# exactly what frame-nv is.  Using it rather than writing a fourth
+# framing layer is the point of having it — and `dfuserial` is
+# therefore about the PROTOCOL, not about finding the end of a packet.
+frame-nv = "^0.1.4"

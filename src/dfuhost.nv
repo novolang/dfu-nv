@@ -1,0 +1,269 @@
+// dfuhost.nv — the updater: one driver, either transport.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// THE ONE MODULE IN THIS PACKAGE THAT PERFORMS, and the manifest names
+// it in `host_modules` for that reason.  Its row is `[io]` and it
+// covers exactly one thing: reading the firmware file.  The transfers
+// themselves are the caller's transport, declared where that transport
+// is — `DfuTransport[e]` below — so a host tool over USB is charged
+// what usb-nv's backend costs and one over a serial port is charged
+// what the port costs, and neither is charged for the other.
+//
+// ONE PLAN, TWO WIRES.  `DfuPlan` is the whole update as a value: how
+// many blocks or objects, how large each is, what to wait, what to
+// compare.  `plan_usb` and `plan_serial` build one from the device's
+// own declarations — `wTransferSize` on USB, the SELECT response on
+// serial — and `step_at` walks it.  A caller drives the plan and the
+// transport performs; nothing here decides when to sleep, which is
+// what makes a whole update a table a test can walk without hardware.
+//
+// WHAT `novo flash` DOES TODAY, AND WHERE THIS SITS BESIDE IT.
+// `novo flash` (docs/tooling.md § novo flash) builds a `.nv` for an
+// nRF52 board and hands the ELF to **probe-rs**, which drives the
+// on-board debug probe over SWD and writes flash directly.  That is a
+// DEVELOPMENT path: it needs a debugger attached, it writes any
+// address, and it does not care what is already on the device.  This
+// package is the FIELD path: no debugger, a device that is running its
+// own bootloader, an image that is checked before anything is erased,
+// and a transport that is already there for another reason.  The two
+// do not overlap and neither replaces the other — a board on a desk
+// takes `novo flash`, and a board in a product takes this.
+
+use dfuimg
+
+// ── The transport ────────────────────────────────────────────────────
+
+// A wire an update can be driven over.
+//
+// `e` is the effect row the implementation supplies: whatever usb-nv's
+// backend declares for a control transfer, `[io]` for a serial port,
+// `[net]` for an update tunnelled over a socket, and NOTHING for a
+// recorded conversation in a test.  That last row is why this trait
+// exists: an update is mostly TIMING and retries, and a transport that
+// is a trait makes every one of those a table rather than a run
+// against a board that might be bricked by getting it wrong.
+pub trait DfuTransport[e]
+    // Send a request and take the reply.  `data` is the outgoing
+    // payload and is empty for a request that has none; the answer is
+    // the incoming payload, empty for a request that returns none.
+    //
+    // ONE METHOD FOR BOTH TRANSPORTS, because a DFU exchange is
+    // request-and-reply on both wires — a control transfer on USB and
+    // a framed write-then-read on a UART — and two methods would put
+    // the difference in this package rather than in the transport
+    // where it belongs.
+    fn dfu_exchange(self, request: Int, value: Int, data: Bytes, expect: Int) -> Result<Bytes, DfuError> [e]
+    // Reset the device, after which it re-enumerates or reboots.  The
+    // one operation that is not an exchange: a device that has just
+    // been told to detach or has finished manifesting does not answer.
+    fn dfu_reset(self) -> ?DfuError [e]
+    // Whether the transport believes it is still connected.  The one
+    // method with no effect row: an update loop asks it on every turn,
+    // and a question that costs `[io]` is a question a caller caches.
+    fn dfu_is_open(self) -> Bool
+
+// ── The plan ─────────────────────────────────────────────────────────
+
+// A whole update, as a value the caller walks.
+//
+// Seven integers.  Everything a caller needs to drive an update to
+// completion and nothing that performs, so a plan can be built,
+// inspected, asserted against and printed before anything is sent to a
+// device.
+pub @value
+struct DfuPlan
+    // `DFU_WIRE_USB` or `DFU_WIRE_SERIAL`.
+    wire: Int
+    // How many bytes of firmware are to be written.
+    image_len: Int
+    // How many bytes each block or object carries.
+    chunk: Int
+    // How many chunks there are, the final zero-length DNLOAD
+    // included on USB.
+    chunks: Int
+    // The longest poll timeout the caller is willing to honour, in
+    // milliseconds.  A device may ask for more; `check_wait` is what
+    // refuses.
+    max_wait_ms: Int
+    // How many times a failed chunk is retried before the update is
+    // abandoned.
+    retries: Int
+    // Whether the device can say when manifestation is finished, which
+    // decides whether the reset is on a signal or on a timer.
+    manifest_tolerant: Bool
+
+// The update goes over USB control transfers.
+pub const DFU_WIRE_USB = 0
+// The update goes over the framed serial protocol.
+pub const DFU_WIRE_SERIAL = 1
+
+// Build a plan for a USB device from its functional descriptor's
+// numbers.
+//
+// `transfer_size` is the device's `wTransferSize` — its own statement
+// of how many bytes a DNLOAD may carry — rather than anything the host
+// chooses, which is the whole reason a plan is built from the device
+// rather than assumed.
+//
+// ```novo
+// use dfuhost
+//
+// fn main() [io]
+//     let p = dfuhost.plan_usb(4096, 64, true, 5000, 3)
+//     println("${dfuhost.plan_chunks(p)}")   // 65
+// ```
+pub fn plan_usb(image_len: Int, transfer_size: Int, manifest_tolerant: Bool, max_wait_ms: Int,
+                retries: Int) -> DfuPlan []
+    todo("dfu-nv.dfuhost.plan_usb")
+
+// Build a plan for a serial device from its SELECT and MTU answers.
+pub fn plan_serial(image_len: Int, max_object: Int, mtu: Int, max_wait_ms: Int,
+                   retries: Int) -> DfuPlan []
+    todo("dfu-nv.dfuhost.plan_serial")
+
+// Which wire.
+pub fn plan_wire(p: DfuPlan) -> Int []
+    todo("dfu-nv.dfuhost.plan_wire")
+
+// How many bytes of firmware.
+pub fn plan_image_len(p: DfuPlan) -> Int []
+    todo("dfu-nv.dfuhost.plan_image_len")
+
+// How many bytes per chunk.
+pub fn plan_chunk(p: DfuPlan) -> Int []
+    todo("dfu-nv.dfuhost.plan_chunk")
+
+// How many chunks.
+pub fn plan_chunks(p: DfuPlan) -> Int []
+    todo("dfu-nv.dfuhost.plan_chunks")
+
+// The longest poll the caller will honour.
+pub fn plan_max_wait_ms(p: DfuPlan) -> Int []
+    todo("dfu-nv.dfuhost.plan_max_wait_ms")
+
+// How many retries a failed chunk gets.
+pub fn plan_retries(p: DfuPlan) -> Int []
+    todo("dfu-nv.dfuhost.plan_retries")
+
+// Where in the image chunk `n` begins.
+pub fn chunk_offset(p: DfuPlan, n: Int) -> Int []
+    todo("dfu-nv.dfuhost.chunk_offset")
+
+// How many bytes chunk `n` carries — the last one is short, and on USB
+// the one after it is empty.
+//
+// ```novo
+// use dfuhost
+//
+// fn main() [io]
+//     let p = dfuhost.plan_usb(100, 64, true, 5000, 3)
+//     println("${dfuhost.chunk_len(p, 1)}")   // 36
+// ```
+pub fn chunk_len(p: DfuPlan, n: Int) -> Int []
+    todo("dfu-nv.dfuhost.chunk_len")
+
+// Whether chunk `n` is the zero-length one that ends a USB download.
+//
+// A named question rather than a comparison, because the empty final
+// block is the single most forgotten part of DFU: without it the
+// device sits in `dfuDNLOAD_IDLE` forever and the host reports
+// success.
+pub fn is_final_chunk(p: DfuPlan, n: Int) -> Bool []
+    todo("dfu-nv.dfuhost.is_final_chunk")
+
+// How long the whole update will take at best, in milliseconds, given
+// a per-chunk round trip and the device's typical poll timeout.
+//
+// An estimate a progress bar needs and a user asks for.  It is
+// arithmetic rather than measurement — the plan knows the chunk count
+// — which is also why it is honest about being a floor.
+pub fn estimated_ms(p: DfuPlan, round_trip_ms: Int, poll_ms: Int) -> Int []
+    todo("dfu-nv.dfuhost.estimated_ms")
+
+// Why a poll timeout the device asked for cannot be honoured, or
+// nothing.
+//
+// A device may legitimately ask for thirty seconds while it erases a
+// large sector, and a host with a five-second patience has to say so
+// rather than time out and leave a half-erased device.
+pub fn check_wait(p: DfuPlan, want_ms: Int) -> ?DfuError []
+    todo("dfu-nv.dfuhost.check_wait")
+
+// Why a plan cannot be run, or nothing.
+pub fn check_plan(p: DfuPlan) -> ?DfuError []
+    todo("dfu-nv.dfuhost.check_plan")
+
+// ── Driving it ───────────────────────────────────────────────────────
+
+// Send one chunk over the transport and take the device's status.
+//
+// `[e]` — the cost is the transport's.  `at` is the chunk index and
+// `data` is the caller's slice of the firmware.
+pub fn send_chunk<T: DfuTransport[e]>(t: T, p: DfuPlan, at: Int,
+                                      data: Bytes) -> Result<Bytes, DfuError> [e]
+    todo("dfu-nv.dfuhost.send_chunk")
+
+// Ask the device for its status.
+pub fn poll_status<T: DfuTransport[e]>(t: T) -> Result<Bytes, DfuError> [e]
+    todo("dfu-nv.dfuhost.poll_status")
+
+// Clear the device's error state, which is the only way out of it.
+pub fn clear_error<T: DfuTransport[e]>(t: T) -> ?DfuError [e]
+    todo("dfu-nv.dfuhost.clear_error")
+
+// Ask an application-mode device to detach and become a bootloader.
+//
+// Followed by a bus reset, after which the device re-enumerates as a
+// different USB device — often with a different product identifier,
+// which is why a host that does not expect two enumerations loses
+// track of it.
+pub fn detach<T: DfuTransport[e]>(t: T, timeout_ms: Int) -> ?DfuError [e]
+    todo("dfu-nv.dfuhost.detach")
+
+// Abort whatever is in progress and return the device to idle.
+pub fn abort<T: DfuTransport[e]>(t: T) -> ?DfuError [e]
+    todo("dfu-nv.dfuhost.abort")
+
+// Read a block back from the device.
+pub fn upload_chunk<T: DfuTransport[e]>(t: T, p: DfuPlan, at: Int) -> Result<Bytes, DfuError> [e]
+    todo("dfu-nv.dfuhost.upload_chunk")
+
+// ── Reading the firmware ─────────────────────────────────────────────
+
+// Read a firmware file and answer its bytes.
+//
+// `[io]` — the one thing this package performs, and the reason this
+// module is named in `host_modules`.
+//
+// ```novo
+// use dfuhost
+//
+// fn main() [io]
+//     match dfuhost.read_image("firmware.bin")
+//         Ok(_)  => println("read")
+//         Err(e) => println(e.message())
+// ```
+pub fn read_image(path: Str) -> Result<Bytes, DfuError> [io]
+    todo("dfu-nv.dfuhost.read_image")
+
+// Read a firmware file and decode the header at its front.
+//
+// Answers a zeroed header when the file does not begin with this
+// format's magic; `dfuimg.header_is_valid` is the question and
+// `dfuimg.check_header` the refusal.
+pub fn read_header(path: Str) -> Result<Bytes, DfuError> [io]
+    todo("dfu-nv.dfuhost.read_header")
+
+// Write a firmware file with this package's header in front of it.
+//
+// The other half, for the tool that BUILDS an image: the header is
+// assembled, the CRC computed through `dfucrc`, and the signature slot
+// left for the caller to fill.
+pub fn write_image(path: Str, h: DfuHeader, payload: Bytes) -> ?DfuError [io]
+    todo("dfu-nv.dfuhost.write_image")
+
+// Whether a file looks like an image this package can read, without
+// reading the whole of it.
+pub fn looks_like_image(path: Str) -> Bool [io]
+    todo("dfu-nv.dfuhost.looks_like_image")

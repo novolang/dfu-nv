@@ -1,0 +1,84 @@
+// dfuerr_tests.nv — the refusals, and the two questions a caller asks
+// about one.
+//
+// RED ON PURPOSE: every assertion against a FUNCTION reaches
+// `not implemented: dfu-nv.dfuerr.<fn>`.
+//
+// THE ASSERTIONS ARE ABOUT WHAT A FAILED UPDATE COSTS.  A refusal
+// found before the erase leaves a device running its old firmware and
+// is safe to report and forget; one found after leaves a half-written
+// slot and means the update has to be run again before the device is
+// rebooted.  `is_pre_erase` is that distinction, and it is the one
+// thing a caller cannot work out for itself.
+
+use std.test
+use dfuerr
+
+@test
+fn test_every_variant_says_something() [io]
+    test.assert(str.len(dfuerr.describe(DfuNotAnImage)) > 0)
+    test.assert(str.len(dfuerr.describe(DfuUnknownFormat(2, 1))) > 0)
+    test.assert(str.len(dfuerr.describe(DfuWrongProduct(0x1209, 0x1210))) > 0)
+    test.assert(str.len(dfuerr.describe(DfuWrongBoard(1, 2))) > 0)
+    test.assert(str.len(dfuerr.describe(DfuDowngrade(1, 2))) > 0)
+    test.assert(str.len(dfuerr.describe(DfuLengthMismatch(4096, 4095))) > 0)
+    test.assert(str.len(dfuerr.describe(DfuChecksumMismatch(1, 2))) > 0)
+    test.assert(str.len(dfuerr.describe(DfuUnsupportedFlag(2))) > 0)
+    test.assert(str.len(dfuerr.describe(DfuTooLarge(8192, 4096))) > 0)
+    test.assert(str.len(dfuerr.describe(DfuBadState(10, 1))) > 0)
+    test.assert(str.len(dfuerr.describe(DfuDeviceReported(7, 10))) > 0)
+    test.assert(str.len(dfuerr.describe(DfuTimedOut(5000))) > 0)
+    test.assert(str.len(dfuerr.describe(DfuPollTooLong(30000, 5000))) > 0)
+    test.assert(str.len(dfuerr.describe(DfuBadFrame(12))) > 0)
+    test.assert(str.len(dfuerr.describe(DfuUnexpectedResponse(3, 1))) > 0)
+    test.assert(str.len(dfuerr.describe(DfuObjectTooLarge(8192, 4096))) > 0)
+    test.assert(str.len(dfuerr.describe(DfuSignatureMissing)) > 0)
+    test.assert(str.len(dfuerr.describe(DfuSourceUnreadable("no such file"))) > 0)
+
+@test
+fn test_a_message_names_the_numbers_that_decided_it() [io]
+    test.case("a failed update is reported by a user who saw a progress bar stop: `this image is for 0x1210` is answered in a minute where `verification failed` is a lab visit")
+    test.assert(str.contains(dfuerr.describe(DfuWrongProduct(0x1209, 0x1210)),
+                             "4624"))
+    test.assert(str.contains(dfuerr.describe(DfuLengthMismatch(4096, 4095)),
+                             "4095"))
+
+@test
+fn test_a_refusal_before_the_erase_leaves_the_device_running() [io]
+    test.case("the distinction a caller cannot work out for itself, and the one that decides whether a device needs the update run again before it is rebooted")
+    test.assert(dfuerr.is_pre_erase(DfuNotAnImage))
+    test.assert(dfuerr.is_pre_erase(DfuWrongProduct(1, 2)))
+    test.assert(dfuerr.is_pre_erase(DfuWrongBoard(1, 2)))
+    test.assert(dfuerr.is_pre_erase(DfuDowngrade(1, 2)))
+    test.assert(dfuerr.is_pre_erase(DfuUnsupportedFlag(2)))
+    test.assert(dfuerr.is_pre_erase(DfuTooLarge(8192, 4096)))
+
+    test.case("and one found during a write does not")
+    test.assert(dfuerr.is_pre_erase(DfuDeviceReported(7, 10)) == false)
+    test.assert(dfuerr.is_pre_erase(DfuTimedOut(5000)) == false)
+
+@test
+fn test_a_corrupt_transfer_is_worth_retrying_and_a_wrong_image_is_not() [io]
+    test.case("an image for another product does not become the right one on a second attempt, and a loop that retried it would run forever")
+    test.assert(dfuerr.is_retryable(DfuChecksumMismatch(1, 2)))
+    test.assert(dfuerr.is_retryable(DfuTimedOut(5000)))
+    test.assert(dfuerr.is_retryable(DfuBadFrame(12)))
+    test.assert(dfuerr.is_retryable(DfuWrongProduct(1, 2)) == false)
+    test.assert(dfuerr.is_retryable(DfuNotAnImage) == false)
+    test.assert(dfuerr.is_retryable(DfuDowngrade(1, 2)) == false)
+
+@test
+fn test_a_poll_too_long_means_wait_longer_and_not_the_device_is_broken() [io]
+    test.case("worth its own variant because the answer is a configuration change rather than a repair")
+    test.assert(str.contains(dfuerr.describe(DfuPollTooLong(30000, 5000)),
+                             "30000"))
+    test.assert(dfuerr.is_retryable(DfuPollTooLong(30000, 5000)) == false)
+
+@test
+fn test_the_error_trait_and_the_free_function_agree() [io]
+    test.assert_eq(DfuNotAnImage.message(), dfuerr.describe(DfuNotAnImage))
+
+@test
+fn test_a_device_reported_status_carries_the_specifications_own_number() [io]
+    test.case("the shared vocabulary between a device and a host, so the two are talking about the same failure")
+    test.assert(str.contains(dfuerr.describe(DfuDeviceReported(7, 10)), "7"))

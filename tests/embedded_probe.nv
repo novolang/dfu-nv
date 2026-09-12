@@ -1,0 +1,219 @@
+// embedded_probe.nv — this package's device claim, as a program that
+// either builds for a Cortex-M or does not.
+//
+// It is not a test.  `scripts/shard_audit.sh`'s `core-embedded` row
+// copies it and the modules it names into a package of its own and
+// runs
+//
+//   novo build --target=nrf52-qemu src/probe.nv
+//
+// which produces a real Cortex-M4 ELF or fails.
+//
+// WHAT THE CLAIM COVERS: the state machine and the image parser —
+// `dfustate` and `dfuimg`.  Those two ARE the bootloader half.  A
+// bootloader is the last code on a device that cannot be updated
+// remotely: if it allocates and the allocator fails, or if it erases
+// before it has finished checking, the device does not come back and
+// nobody can fix it.  So both are `@value` structs of machine words in
+// the caller's own stack frame, and this file is what keeps that true.
+//
+// WHAT IS DELIBERATELY OUT.  `dfuhost` is `host` and named in the
+// manifest's `host_modules`, so the audit leaves it behind.  `dfucrc`
+// is the one module that names crc-nv, and leaving it out keeps the
+// probe's closure to this package's own sources — which is why every
+// function here takes a CRC as an `Int` the caller computed, and why a
+// device with a CRC peripheral in silicon passes its hardware's answer
+// in.  `dfuusb` names usb-nv's types and would pull that package's
+// modules in; a real bootloader links it and this probe does not, so
+// that the claim is about THIS package.  `dfuserial` and `dfuse` are
+// `core` and would build.
+//
+// WHAT THE TIER ACTUALLY CHECKS AT 0.0.1 is narrower than it will be.
+// Every body under `src/` is a `todo()`, so what links today is the
+// SIGNATURES and the types, with no allocator anywhere in the shape.
+// There is no arithmetic in the binary yet, so this probe does not
+// prove a header is parsed without allocating; it proves that nothing
+// in the shape of the surface needs an allocator or a host.  Keeping
+// it green once the bodies land is a named cost of the implementation
+// step.
+
+use dfustate
+use dfuimg
+
+// A product's own numbers, as a bootloader holds them: the pid.codes
+// vendor identifier, one board revision, a 4 KB image at the usual
+// nRF52 application offset, and the published CRC-32 check value
+// standing in for a real one.
+const PRODUCT: Int = 0x1209
+const BOARD: Int = 1
+const IMAGE_LEN: Int = 4096
+const IMAGE_CRC: Int = 0xCBF43926
+const LOAD_ADDR: Int = 0x00027000
+const BLOCK: Int = 64
+
+// Every answer this probe checks, folded into one number so a single
+// comparison decides the run.  A firmware image has one line of
+// output; making it depend on all of them is what stops a passing run
+// from meaning "the first call linked".
+@tier(embedded)
+fn score() -> Int
+    var n = 0
+
+    // ── The header, checked before anything is erased ────────────────
+    let h = dfuimg.header(PRODUCT, BOARD, 0x00010200, IMAGE_LEN, IMAGE_CRC,
+                          LOAD_ADDR, LOAD_ADDR, 0)
+    if dfuimg.product_id(h) == PRODUCT
+        n = n + 1
+    if dfuimg.payload_len(h) == IMAGE_LEN
+        n = n + 1
+    if dfuimg.payload_crc(h) == IMAGE_CRC
+        n = n + 1
+    if dfuimg.load_address(h) == LOAD_ADDR
+        n = n + 1
+    if dfuimg.header_is_valid(h)
+        n = n + 1
+    if dfuimg.is_signed(h) == false
+        n = n + 1
+    // Byte 0 is the magic's first byte, which is the cheapest possible
+    // refusal of an arbitrary file.
+    if dfuimg.header_byte(h, 0) == 0x4E
+        n = n + 1
+    if dfuimg.image_len(h) == IMAGE_LEN + dfuimg.DFU_HEADER_LEN
+        n = n + 1
+
+    // The one question a bootloader asks before it erases anything,
+    // and the five ways it can answer no.
+    if dfuimg.can_commit(h, PRODUCT, BOARD, IMAGE_LEN, IMAGE_CRC)
+        n = n + 1
+    if dfuimg.can_commit(h, 0x1210, BOARD, IMAGE_LEN, IMAGE_CRC) == false
+        n = n + 1
+    if dfuimg.can_commit(h, PRODUCT, 2, IMAGE_LEN, IMAGE_CRC) == false
+        n = n + 1
+    if dfuimg.can_commit(h, PRODUCT, BOARD, 4095, IMAGE_CRC) == false
+        n = n + 1
+    if dfuimg.can_commit(h, PRODUCT, BOARD, IMAGE_LEN, 0) == false
+        n = n + 1
+
+    // The signed region is the header without its slot plus the
+    // payload, and it is fixed here so two implementations cannot
+    // disagree about what was signed.
+    if dfuimg.is_signed_region(0) == false
+        n = n + 1
+    if dfuimg.is_signed_region(dfuimg.DFU_SIGNATURE_LEN)
+        n = n + 1
+    if dfuimg.is_newer(0x00010300, 0x00010200)
+        n = n + 1
+    if dfuimg.is_newer(0x00010100, 0x00010200) == false
+        n = n + 1
+
+    // A partial transfer, as a device tracks one off a wire.
+    var r = dfuimg.receive()
+    if dfuimg.received(r) == 0
+        n = n + 1
+    if dfuimg.remaining(r, h) == IMAGE_LEN
+        n = n + 1
+    r = dfuimg.advanced(r, BLOCK, 0)
+    if dfuimg.received(r) == BLOCK
+        n = n + 1
+    if dfuimg.receive_status(r) == dfuimg.DFU_RECV_PARTIAL
+        n = n + 1
+    if dfuimg.receive_is_complete(r) == false
+        n = n + 1
+
+    // ── The state machine, which a bootloader runs in a control
+    //    transfer ─────────────────────────────────────────────────────
+    if dfustate.initial_state() == dfustate.DFU_STATE_DFU_IDLE
+        n = n + 1
+
+    let idle = dfustate.status(dfustate.DFU_STATUS_OK, 0,
+                               dfustate.DFU_STATE_DFU_IDLE, 0)
+    if dfustate.status_is_ok(idle)
+        n = n + 1
+    if dfustate.status_byte(idle, 0) == dfustate.DFU_STATUS_OK
+        n = n + 1
+
+    // A DNLOAD moves to DNLOAD_SYNC, where the device is waiting for
+    // the GETSTATUS the protocol requires.
+    let dn = dfustate.step(dfustate.DFU_STATE_DFU_IDLE,
+                           dfustate.DFU_REQ_DNLOAD, BLOCK, idle)
+    if dfustate.step_next_state(dn) == dfustate.DFU_STATE_DNLOAD_SYNC
+        n = n + 1
+    if dfustate.step_action(dn) == dfustate.DFU_ACT_POLL_STATUS
+        n = n + 1
+
+    // And the GETSTATUS that follows carries the poll timeout the
+    // whole protocol's back-pressure is.  A host that ignores it
+    // writes while the device is erasing.
+    let busy = dfustate.status(dfustate.DFU_STATUS_OK, 250,
+                               dfustate.DFU_STATE_DNBUSY, 0)
+    if dfustate.poll_timeout_ms(busy) == 250
+        n = n + 1
+    let wait = dfustate.step(dfustate.DFU_STATE_DNLOAD_SYNC,
+                             dfustate.DFU_REQ_GETSTATUS, 0, busy)
+    if dfustate.step_wait_ms(wait) == 250
+        n = n + 1
+    if dfustate.step_action(wait) == dfustate.DFU_ACT_WAIT
+        n = n + 1
+
+    // A zero-length DNLOAD is how a download says it is finished.
+    let fin = dfustate.step(dfustate.DFU_STATE_DNLOAD_IDLE,
+                            dfustate.DFU_REQ_DNLOAD, 0, idle)
+    if dfustate.step_next_state(fin) == dfustate.DFU_STATE_MANIFEST_SYNC
+        n = n + 1
+
+    // The error state admits exactly one request, and a host that
+    // sends another gets a stall it cannot explain.
+    if dfustate.is_error_state(dfustate.DFU_STATE_ERROR)
+        n = n + 1
+    if dfustate.request_allowed(dfustate.DFU_STATE_ERROR,
+                                dfustate.DFU_REQ_CLRSTATUS)
+        n = n + 1
+    if dfustate.request_allowed(dfustate.DFU_STATE_ERROR,
+                                dfustate.DFU_REQ_DNLOAD) == false
+        n = n + 1
+
+    // An application is not a bootloader, and a DNLOAD to one is
+    // refused.
+    if dfustate.is_application(dfustate.DFU_STATE_APP_IDLE)
+        n = n + 1
+    if dfustate.is_application(dfustate.DFU_STATE_DFU_IDLE) == false
+        n = n + 1
+    if dfustate.is_downloading(dfustate.DFU_STATE_DNBUSY)
+        n = n + 1
+    if dfustate.is_manifesting(dfustate.DFU_STATE_MANIFEST)
+        n = n + 1
+
+    // A device that cannot speak during manifestation leaves the host
+    // guessing when to reset.
+    if dfustate.is_manifest_tolerant(dfustate.DFU_ATTR_MANIFEST_TOLERANT)
+        n = n + 1
+    if dfustate.is_manifest_tolerant(dfustate.DFU_ATTR_CAN_DNLOAD) == false
+        n = n + 1
+
+    // The block count includes the empty final block, which is the
+    // single most forgotten part of DFU.
+    if dfustate.block_count(IMAGE_LEN, BLOCK) == 65
+        n = n + 1
+    if dfustate.block_number(0) == 0
+        n = n + 1
+    // Sixteen bits of block number is 4 MB at 64-byte blocks, which is
+    // why a larger device needs DfuSe's address pointer.
+    if dfustate.max_image_len(BLOCK) == 4194304
+        n = n + 1
+
+    n
+
+@tier(rt)
+fn main() [hw, time]
+    bsp.board.init()
+    // 40 is the number of checks in `score` on the path a linked build
+    // takes.  The count is printed on a failure rather than only
+    // compared, so a device that disagrees with the host says HOW MANY
+    // it lost and a bisect has somewhere to start.
+    let n = score()
+    if n == 40
+        hal.uart.write("PASS: dfu-embedded\n")
+    else
+        hal.uart.write("FAIL: dfu-embedded\n")
+    loop
+        core.rt.sleep_ms(1000)

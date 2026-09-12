@@ -1,0 +1,138 @@
+// dfuerr.nv — what a firmware update can be wrong about.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// EVERY VARIANT NAMES A NUMBER, and that is not decoration.  A failed
+// firmware update is the least debuggable event a product has: it
+// happens in the field, on a device that may no longer boot, reported
+// by a user who saw a progress bar stop.  "Verification failed" sends
+// somebody to a lab; "this image is for product 0x1210 and this device
+// is 0x1209" is answered by a person in a minute.
+//
+// THE REFUSALS ARE ORDERED BY WHEN THEY CAN BE MADE.  The first five
+// are checkable before a single byte is erased, which is the property
+// `dfuimg.can_commit` exists to preserve — a bootloader that erases
+// and then refuses has bricked the device.  The rest can only be found
+// during or after a write, and each of those is a device that needs
+// the update run again rather than replaced.
+//
+// Every variant is prefixed `Dfu`, because a variant is constructed by
+// name rather than by the type the expression expects.
+
+// What went wrong.
+pub enum DfuError
+    // The bytes offered do not begin with this format's magic.  Almost
+    // always the wrong file rather than a corrupt one.
+    DfuNotAnImage
+    // The image was written by a newer version of this format.
+    DfuUnknownFormat(found: Int, supported: Int)
+    // The image is for another product.  `want` is the device's and
+    // `found` is the image's, in that order, because the device is the
+    // thing that cannot change.
+    DfuWrongProduct(want: Int, found: Int)
+    // The image is for another revision of this board.
+    DfuWrongBoard(want: Int, found: Int)
+    // The image is older than what is installed, and this product
+    // refuses downgrades.
+    DfuDowngrade(candidate: Int, installed: Int)
+    // The payload is shorter or longer than the header declared.
+    DfuLengthMismatch(want: Int, have: Int)
+    // The payload's CRC-32 does not match the header's.  The image
+    // arrived corrupt; run the update again.
+    DfuChecksumMismatch(want: Int, have: Int)
+    // The image declares a flag this bootloader cannot honour —
+    // compression it cannot expand, encryption it has no key for.
+    // Refused rather than written, because writing it produces a
+    // device that does not boot.
+    DfuUnsupportedFlag(flags: Int)
+    // The image does not fit the slot it would be written to.
+    DfuTooLarge(image_len: Int, capacity: Int)
+    // A DFU request was sent in a state that does not admit it.  The
+    // device answers a stall and drops into the error state, which
+    // costs a CLRSTATUS and an abandoned update if the host does not
+    // recognise it.
+    DfuBadState(state: Int, request: Int)
+    // The device reported a DFU status code.  `status` is one of
+    // `dfustate`'s `DFU_STATUS_*` values, carried as a number because
+    // the specification's table is the shared vocabulary.
+    DfuDeviceReported(status: Int, state: Int)
+    // The device did not answer inside the deadline the caller gave.
+    DfuTimedOut(ms: Int)
+    // The device asked for a poll timeout longer than the caller is
+    // willing to wait.  Worth its own variant because the answer is
+    // "wait longer", not "the device is broken".
+    DfuPollTooLong(want_ms: Int, limit_ms: Int)
+    // A serial bootloader frame did not decode.
+    DfuBadFrame(at: Int)
+    // A serial bootloader answered a response code that does not match
+    // the request it was sent.
+    DfuUnexpectedResponse(want: Int, found: Int)
+    // A serial bootloader object is larger than the device's staging
+    // buffer.
+    DfuObjectTooLarge(len: Int, capacity: Int)
+    // The image says it is signed and the signature slot is empty, or
+    // the caller asked for verification and supplied no key.  This
+    // package does no cryptography; what it refuses is an image whose
+    // own claims do not hold together.
+    DfuSignatureMissing
+    // Reading the firmware file failed.
+    DfuSourceUnreadable(detail: Str)
+
+// The one-line report: what was refused, and the numbers that decided
+// it.
+//
+// `Result<_, DfuError>` requires this impl: SPEC § 3.4 admits a
+// `Result` error type only if it implements `Error`.
+//
+// ```novo
+// use dfuerr
+//
+// fn main() [io]
+//     println(dfuerr.describe(DfuSignatureMissing))
+// ```
+impl Error for DfuError
+    fn message(self) -> Str
+        todo("dfu-nv.dfuerr.DfuError.message")
+
+// The same sentence as `message`, as a free function, for a caller
+// that has an error value rather than a `Result` to call `.message()`
+// on.
+//
+// ```novo
+// use dfuerr
+//
+// fn main() [io]
+//     println(dfuerr.describe(DfuWrongProduct(0x1209, 0x1210)))
+// ```
+pub fn describe(e: DfuError) -> Str []
+    todo("dfu-nv.dfuerr.describe")
+
+// Whether the fault was found BEFORE anything was erased.
+//
+// The distinction a bootloader's caller most needs: a refusal in this
+// class leaves the device running its old firmware and is safe to
+// report and forget, while one outside it leaves a half-written slot
+// and means the update has to be run again before the device is
+// rebooted.
+//
+// ```novo
+// use dfuerr
+//
+// fn main() [io]
+//     println("${dfuerr.is_pre_erase(DfuWrongProduct(1, 2))}")   // true
+// ```
+pub fn is_pre_erase(e: DfuError) -> Bool []
+    todo("dfu-nv.dfuerr.is_pre_erase")
+
+// Whether running the same update again could succeed — a corrupt
+// transfer, a timeout — as against an image this device will refuse
+// every time.
+//
+// ```novo
+// use dfuerr
+//
+// fn main() [io]
+//     println("${dfuerr.is_retryable(DfuChecksumMismatch(1, 2))}")   // true
+// ```
+pub fn is_retryable(e: DfuError) -> Bool []
+    todo("dfu-nv.dfuerr.is_retryable")

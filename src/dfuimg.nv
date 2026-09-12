@@ -1,0 +1,382 @@
+// dfuimg.nv — the image format: a header a bootloader can trust before
+// it erases anything.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// THE HEADER EXISTS SO THAT ERASING IS THE LAST THING THAT HAPPENS.  A
+// bootloader that erases the application slot and then discovers the
+// image is for another product, or truncated, or corrupt, has bricked
+// the device — there is nothing left to run and no way to ask for a
+// better image.  So everything a bootloader can check, it checks
+// first: the magic, the format version, the product and board
+// identifiers, the declared length against what arrived, and the
+// CRC-32 over the payload.  `can_commit` is that whole list as one
+// question.
+//
+// THE SIGNATURE SLOT IS A SLOT AND NOT A SIGNATURE.  This package does
+// no cryptography: `signature_offset` and `DFU_SIGNATURE_LEN` say
+// where sixty-four bytes live and what they cover, and a caller fills
+// them with ed25519-nv or leaves them zero.  The reason is that a
+// signature scheme is a decision a product makes once and cannot
+// change — key length, key storage, revocation, what happens on a
+// verification failure — and a firmware format that chose one for its
+// users would be a format half of them could not use.  What this
+// package DOES fix is the one thing that must not be a decision:
+// **the signed region is the header-without-the-signature plus the
+// payload**, so two implementations cannot disagree about what was
+// signed.
+//
+// A `@value` HEADER AND A CALLER'S PAYLOAD.  The header is nine
+// integers; the firmware itself is megabytes and stays wherever the
+// caller has it — a file on a host, a receive buffer on a device.
+// `header_byte` writes the header out a byte at a time and
+// `header_decode` reads one back, so neither half needs a buffer of
+// its own.
+//
+// THE CRC IS AN `Int` THE CALLER SUPPLIES.  crc-nv computes it and
+// `dfucrc` is the one-line bridge, but the functions here take the
+// number — which is what lets a device with a CRC peripheral in
+// silicon pass its hardware's answer in, and what keeps this module
+// out of any dependency's module closure.
+
+// ── The header ───────────────────────────────────────────────────────
+
+// The four bytes every image starts with: `N`, `V`, `F`, `W`.
+//
+// A magic rather than a version alone, because the first thing a
+// bootloader meets is an arbitrary byte stream from a possibly
+// confused host, and four known bytes is the cheapest way to refuse
+// a JPEG before doing arithmetic on it.
+pub const DFU_MAGIC = 0x5746564E
+
+// The format version this package writes and reads.
+pub const DFU_FORMAT_VERSION = 1
+
+// How many bytes a header occupies: 64.
+//
+// A power of two, and a whole flash write page on nothing — which is
+// deliberate: the header is written LAST on a device that stages
+// images, so a power cut during the payload leaves a slot with no
+// valid header rather than a valid header over a partial image.
+pub const DFU_HEADER_LEN = 64
+
+// How many bytes the signature slot holds: 64, an Ed25519 signature.
+pub const DFU_SIGNATURE_LEN = 64
+
+// Where the signature slot begins inside the header.
+pub const DFU_SIGNATURE_OFFSET = 0
+
+// An image header.
+//
+// Nine integers, so a bootloader holds one in a stack frame while it
+// decides whether to erase anything.
+pub @value
+struct DfuHeader
+    // The format version.
+    format: Int
+    // Which product this image is for.  A bootloader that flashes
+    // another product's firmware has bricked the device, and this is
+    // the field that stops it.
+    product_id: Int
+    // Which board revision, for a product whose pinout changed.  0
+    // means any.
+    board_rev: Int
+    // The firmware's own version, for a bootloader that refuses a
+    // downgrade.
+    version: Int
+    // How many bytes of payload follow the header.
+    payload_len: Int
+    // CRC-32 over the payload, IEEE 802.3 polynomial — the one crc-nv
+    // publishes and the one every other firmware tool uses.
+    payload_crc: Int
+    // Where in the device's address space the payload is written.
+    load_address: Int
+    // Where execution starts, which is not always the load address: a
+    // vector table at the start of the image means the entry point is
+    // read out of it rather than assumed.
+    entry_point: Int
+    // `DFU_IMG_*` flags.
+    flags: Int
+
+// The image is signed: the signature slot holds sixty-four meaningful
+// bytes.
+pub const DFU_IMG_SIGNED = 0x01
+// The payload is compressed.  This package does not decompress —
+// `flate-nv` is the package for that — but the flag is in the format
+// so a bootloader can refuse an image it cannot expand rather than
+// writing it.
+pub const DFU_IMG_COMPRESSED = 0x02
+// The payload is encrypted.  Same rule: named so it can be refused.
+pub const DFU_IMG_ENCRYPTED = 0x04
+// The image is a delta against a named previous version rather than a
+// whole firmware.
+pub const DFU_IMG_DELTA = 0x08
+
+// Build a header.
+//
+// ```novo
+// use dfuimg
+//
+// fn main() [io]
+//     let h = dfuimg.header(0x1209, 1, 0x00010200, 4096, 0xCBF43926,
+//                           0x00027000, 0x00027100, 0)
+//     println("${dfuimg.payload_len(h)}")   // 4096
+// ```
+pub fn header(product_id: Int, board_rev: Int, version: Int, payload_len: Int, payload_crc: Int,
+              load_address: Int, entry_point: Int, flags: Int) -> DfuHeader []
+    todo("dfu-nv.dfuimg.header")
+
+// The format version.
+pub fn format_version(h: DfuHeader) -> Int []
+    todo("dfu-nv.dfuimg.format_version")
+
+// The product identifier.
+pub fn product_id(h: DfuHeader) -> Int []
+    todo("dfu-nv.dfuimg.product_id")
+
+// The board revision, or 0 for any.
+pub fn board_rev(h: DfuHeader) -> Int []
+    todo("dfu-nv.dfuimg.board_rev")
+
+// The firmware version.
+pub fn image_version(h: DfuHeader) -> Int []
+    todo("dfu-nv.dfuimg.image_version")
+
+// How many payload bytes follow.
+pub fn payload_len(h: DfuHeader) -> Int []
+    todo("dfu-nv.dfuimg.payload_len")
+
+// The declared CRC-32 over the payload.
+pub fn payload_crc(h: DfuHeader) -> Int []
+    todo("dfu-nv.dfuimg.payload_crc")
+
+// Where the payload is written.
+pub fn load_address(h: DfuHeader) -> Int []
+    todo("dfu-nv.dfuimg.load_address")
+
+// Where execution starts.
+pub fn entry_point(h: DfuHeader) -> Int []
+    todo("dfu-nv.dfuimg.entry_point")
+
+// The `DFU_IMG_*` flags.
+pub fn image_flags(h: DfuHeader) -> Int []
+    todo("dfu-nv.dfuimg.image_flags")
+
+// Whether the signature slot is meaningful.
+pub fn is_signed(h: DfuHeader) -> Bool []
+    todo("dfu-nv.dfuimg.is_signed")
+
+// Whether the payload needs expanding before it can be written.
+pub fn is_compressed(h: DfuHeader) -> Bool []
+    todo("dfu-nv.dfuimg.is_compressed")
+
+// The `i`-th of the sixty-four header bytes, little-endian throughout.
+//
+// The signature occupies bytes 0 to 63 of nothing: it is written after
+// the fixed fields, at `DFU_SIGNATURE_OFFSET`, and `header_byte`
+// answers 0 there — a caller that has a signature writes it over the
+// slot itself, which is what keeps the signed region computable
+// without a signature in hand.
+//
+// ```novo
+// use dfuimg
+//
+// fn main() [io]
+//     let h = dfuimg.header(0x1209, 1, 1, 4096, 0, 0, 0, 0)
+//     println("${dfuimg.header_byte(h, 0)}")   // 78, which is 'N'
+// ```
+pub fn header_byte(h: DfuHeader, i: Int) -> Int []
+    todo("dfu-nv.dfuimg.header_byte")
+
+// Decode a header from the sixty-four bytes at `off`.
+//
+// Answers a zeroed header when fewer than sixty-four bytes are
+// available or the magic is wrong, because a `@value` struct cannot be
+// a `Result` payload (E2015).  `check_header` is the refusal beside
+// it, and `header_is_valid` the one-line question.
+pub fn header_decode(buf: [u8], off: Int) -> DfuHeader []
+    todo("dfu-nv.dfuimg.header_decode")
+
+// Whether the bytes at `off` begin with this format's magic.
+//
+// The first thing a bootloader asks, before any arithmetic: four
+// known bytes refuses an arbitrary file cheaply.
+pub fn has_magic(buf: [u8], off: Int) -> Bool []
+    todo("dfu-nv.dfuimg.has_magic")
+
+// ── Deciding whether to erase ────────────────────────────────────────
+
+// Whether this image may be written to a device with these
+// identifiers, given the payload's actual length and computed CRC.
+//
+// THE ONE QUESTION A BOOTLOADER ASKS BEFORE IT ERASES ANYTHING, and
+// the reason it is one call rather than six: a bootloader that checks
+// five of the six conditions is a bootloader that bricks a device on
+// the sixth, and every one of them has to be checked BEFORE the erase
+// because after it there is nothing left to run.
+//
+// `have_crc` is the caller's — computed by crc-nv through `dfucrc`, or
+// by a CRC peripheral in silicon.
+//
+// ```novo
+// use dfuimg
+//
+// fn main() [io]
+//     let h = dfuimg.header(0x1209, 1, 1, 4096, 0xCBF43926, 0, 0, 0)
+//     println("${dfuimg.can_commit(h, 0x1209, 1, 4096, 0xCBF43926)}")
+// ```
+pub fn can_commit(h: DfuHeader, device_product: Int, device_board_rev: Int, have_len: Int,
+                  have_crc: Int) -> Bool []
+    todo("dfu-nv.dfuimg.can_commit")
+
+// Why the image may not be written, or nothing.
+//
+// The refusal beside `can_commit`, and the one a host prints: "this
+// image is for product 0x1210 and this device is 0x1209" is actionable
+// where "verification failed" is not.
+pub fn check_header(h: DfuHeader, device_product: Int, device_board_rev: Int, have_len: Int,
+                    have_crc: Int) -> ?DfuError []
+    todo("dfu-nv.dfuimg.check_header")
+
+// Whether the header's own fields are self-consistent, with no device
+// to compare against — what a host tool checks on a file before it
+// looks for a device.
+pub fn header_is_valid(h: DfuHeader) -> Bool []
+    todo("dfu-nv.dfuimg.header_is_valid")
+
+// Whether `candidate` is a newer version than `installed`.
+//
+// The anti-rollback question, as a comparison rather than a policy: a
+// product that refuses downgrades calls this, and one that allows them
+// for field support does not.  The version is one integer, compared
+// numerically, which is the only scheme that cannot be disagreed
+// about.
+pub fn is_newer(candidate: Int, installed: Int) -> Bool []
+    todo("dfu-nv.dfuimg.is_newer")
+
+// ── The signed region ────────────────────────────────────────────────
+
+// How many bytes a whole image occupies: the header plus its payload.
+//
+// ```novo
+// use dfuimg
+//
+// fn main() [io]
+//     println("${dfuimg.image_len(dfuimg.header(0, 0, 0, 4096, 0, 0, 0, 0))}")
+// ```
+pub fn image_len(h: DfuHeader) -> Int []
+    todo("dfu-nv.dfuimg.image_len")
+
+// Where the payload begins inside a whole image: `DFU_HEADER_LEN`.
+pub fn payload_offset() -> Int []
+    todo("dfu-nv.dfuimg.payload_offset")
+
+// Where the signature slot begins inside a whole image.
+pub fn signature_offset() -> Int []
+    todo("dfu-nv.dfuimg.signature_offset")
+
+// Whether byte `i` of a whole image is inside the region a signature
+// covers.
+//
+// THE ONE THING THIS PACKAGE FIXES ABOUT SIGNING.  The signed region
+// is everything except the signature slot itself — the rest of the
+// header and the whole payload — and two implementations that
+// disagreed about it would produce signatures neither could verify.
+// A predicate rather than a pair of offsets, because the region is not
+// contiguous: the slot sits inside the header.
+//
+// ```novo
+// use dfuimg
+//
+// fn main() [io]
+//     println("${dfuimg.is_signed_region(0)}")    // false — inside the slot
+//     println("${dfuimg.is_signed_region(64)}")   // true — the payload
+// ```
+pub fn is_signed_region(i: Int) -> Bool []
+    todo("dfu-nv.dfuimg.is_signed_region")
+
+// How many bytes a signature covers for an image with this header.
+pub fn signed_len(h: DfuHeader) -> Int []
+    todo("dfu-nv.dfuimg.signed_len")
+
+// ── Writing one, on a device ─────────────────────────────────────────
+
+// How far a partially received image has got, and whether what has
+// arrived so far is consistent with the header that declared it.
+//
+// A `@value` struct of three integers, so a bootloader tracks a
+// transfer with nothing on a heap.  The running CRC is the caller's,
+// folded in a block at a time.
+pub @value
+struct DfuReceive
+    // How many payload bytes have arrived.
+    received: Int
+    // The running CRC-32 state over what has arrived.
+    crc_state: Int
+    // One of the `DFU_RECV_*` codes.
+    status: Int
+
+// Nothing has arrived yet.
+pub const DFU_RECV_EMPTY = 0
+// The transfer is in progress.
+pub const DFU_RECV_PARTIAL = 1
+// Every declared byte has arrived and the CRC matches.
+pub const DFU_RECV_COMPLETE = 2
+// More bytes arrived than the header declared, or the CRC does not
+// match.  Either way nothing should be committed.
+pub const DFU_RECV_BAD = 3
+
+// A fresh transfer.
+//
+// ```novo
+// use dfuimg
+//
+// fn main() [io]
+//     println("${dfuimg.received(dfuimg.receive())}")   // 0
+// ```
+pub fn receive() -> DfuReceive []
+    todo("dfu-nv.dfuimg.receive")
+
+// The transfer after `len` more bytes whose running CRC state the
+// caller computed.
+//
+// The CRC state is passed through rather than kept, for the same
+// reason crc-nv's own `update` does: a device folding bytes as they
+// arrive off a UART has the state in a register and nothing to gain
+// from this module holding it.
+pub fn advanced(r: DfuReceive, len: Int, crc_state: Int) -> DfuReceive []
+    todo("dfu-nv.dfuimg.advanced")
+
+// How many payload bytes have arrived.
+pub fn received(r: DfuReceive) -> Int []
+    todo("dfu-nv.dfuimg.received")
+
+// The running CRC state.
+pub fn crc_state(r: DfuReceive) -> Int []
+    todo("dfu-nv.dfuimg.crc_state")
+
+// The `DFU_RECV_*` status.
+pub fn receive_status(r: DfuReceive) -> Int []
+    todo("dfu-nv.dfuimg.receive_status")
+
+// How many bytes are still expected.
+pub fn remaining(r: DfuReceive, h: DfuHeader) -> Int []
+    todo("dfu-nv.dfuimg.remaining")
+
+// The transfer with its final verdict decided against the header and
+// the finished CRC.
+//
+// A separate call from `advanced` because finishing a CRC is not the
+// same operation as folding a byte into one — crc-nv's `finish`
+// applies the final xor, and a transfer that compared the running
+// state against the declared value would never match.
+pub fn finished(r: DfuReceive, h: DfuHeader, final_crc: Int) -> DfuReceive []
+    todo("dfu-nv.dfuimg.finished")
+
+// Whether every declared byte arrived and the CRC matched.
+pub fn receive_is_complete(r: DfuReceive) -> Bool []
+    todo("dfu-nv.dfuimg.receive_is_complete")
+
+// Why a transfer cannot be committed, or nothing.
+pub fn check_receive(r: DfuReceive, h: DfuHeader) -> ?DfuError []
+    todo("dfu-nv.dfuimg.check_receive")

@@ -1,0 +1,387 @@
+// dfuserial.nv — the serial bootloader: objects over a framed UART.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// THE SECOND TRANSPORT IS THE ONE THE BOARDS ACTUALLY USE.  The nRF52
+// development kits in `orbit/bsp` update over a UART, not over USB,
+// and so does every product that reaches its bootloader through a
+// debug header or a radio gateway.  A package that carried only the
+// USB class would be a package neither board could use.
+//
+// AN OBJECT PROTOCOL RATHER THAN A BLOCK PROTOCOL, and the difference
+// is the point.  DFU over USB sends numbered blocks and hopes; the
+// serial protocol CREATES an object of a declared size, writes into
+// it, asks for its CRC, and only then EXECUTES it — so the receiver
+// checks what it has before it commits, and a transfer interrupted
+// halfway leaves a device that still boots.  That is also what makes a
+// resume possible: `select` answers how much of an object already
+// arrived, and a host reconnecting after a dropped link carries on
+// rather than starting again.
+//
+// FRAMING IS frame-nv's.  A length prefix, COBS, and a CRC over the
+// whole frame is exactly what frame-nv publishes, so nothing here
+// looks for the end of a packet.  What is here is the protocol: eight
+// opcodes, their responses, and the object state machine.
+//
+// THE OBJECT SIZE IS THE DEVICE'S TO DECLARE, and a host that ignores
+// it overruns the staging buffer.  `select` answers it, `max_size`
+// reads it back, and `check_create` refuses a create that exceeds it —
+// which is the serial equivalent of `wTransferSize` and the same class
+// of bug.
+
+// ── The opcodes ──────────────────────────────────────────────────────
+
+// PROTOCOL_VERSION — which version of this protocol the device
+// speaks.  The first request a host sends, before anything it says can
+// be interpreted.
+pub const DFU_OP_PROTOCOL_VERSION = 0x00
+// OBJECT_CREATE — begin an object of a declared size.
+pub const DFU_OP_OBJECT_CREATE = 0x01
+// RECEIPT_NOTIF_SET — how often the device should acknowledge, in
+// bytes.  0 switches acknowledgements off, which is faster and gives
+// a host nothing to resume from.
+pub const DFU_OP_RECEIPT_NOTIF_SET = 0x02
+// CRC_GET — the running CRC-32 and byte count of the current object.
+// The request that makes the protocol safe: a host compares it against
+// its own before executing anything.
+pub const DFU_OP_CRC_GET = 0x03
+// OBJECT_EXECUTE — commit the current object.
+pub const DFU_OP_OBJECT_EXECUTE = 0x04
+// OBJECT_SELECT — which object type is current, how large the device
+// will let it be, and how much of it has already arrived.
+pub const DFU_OP_OBJECT_SELECT = 0x06
+// MTU_GET — the largest frame the device's serial buffer holds.
+pub const DFU_OP_MTU_GET = 0x07
+// OBJECT_WRITE — payload bytes into the current object.
+pub const DFU_OP_OBJECT_WRITE = 0x08
+// PING — a request with a token the device echoes, for a host checking
+// that a link is alive and in sync.
+pub const DFU_OP_PING = 0x09
+// RESPONSE — the opcode every reply begins with.
+pub const DFU_OP_RESPONSE = 0x60
+
+// ── The object types ─────────────────────────────────────────────────
+
+// The command object: the image header, which arrives first and is
+// small.
+pub const DFU_OBJ_COMMAND = 0x01
+// The data object: the firmware itself, which arrives in as many
+// objects as the device's staging buffer needs.
+pub const DFU_OBJ_DATA = 0x02
+
+// ── The result codes ─────────────────────────────────────────────────
+
+// The request succeeded.
+pub const DFU_RES_SUCCESS = 0x01
+// The opcode is not one this device knows.
+pub const DFU_RES_OP_NOT_SUPPORTED = 0x02
+// A parameter is out of range.
+pub const DFU_RES_INVALID_PARAMETER = 0x03
+// The object does not fit the device's staging buffer.
+pub const DFU_RES_INSUFFICIENT_RESOURCES = 0x04
+// The object is already in progress, or there is none.
+pub const DFU_RES_INVALID_OBJECT = 0x05
+// The signature type is not one this device accepts.
+pub const DFU_RES_UNSUPPORTED_TYPE = 0x07
+// The operation is not permitted in this state.
+pub const DFU_RES_OPERATION_NOT_PERMITTED = 0x08
+// The device's own verification of what arrived failed.
+pub const DFU_RES_OPERATION_FAILED = 0x0A
+
+// ── What a request is ────────────────────────────────────────────────
+
+// One request, as a value.
+//
+// Four integers: everything but OBJECT_WRITE's payload, which is the
+// caller's buffer.  A `@value` struct, so a bootloader parses a
+// request in a UART interrupt with nothing on a heap.
+pub @value
+struct DfuSerialReq
+    // One of the `DFU_OP_*` codes.
+    op: Int
+    // The object type for CREATE and SELECT, the byte interval for
+    // RECEIPT_NOTIF_SET, the token for PING.
+    arg: Int
+    // The declared size for CREATE.
+    size: Int
+    // How many payload bytes an OBJECT_WRITE carries.  The bytes
+    // themselves stay in the caller's buffer.
+    payload_len: Int
+
+// Build a request.
+//
+// ```novo
+// use dfuserial
+//
+// fn main() [io]
+//     let r = dfuserial.request(dfuserial.DFU_OP_OBJECT_CREATE,
+//                               dfuserial.DFU_OBJ_DATA, 4096, 0)
+//     println("${dfuserial.req_size(r)}")   // 4096
+// ```
+pub fn request(op: Int, arg: Int, size: Int, payload_len: Int) -> DfuSerialReq []
+    todo("dfu-nv.dfuserial.request")
+
+// The opcode.
+pub fn req_op(r: DfuSerialReq) -> Int []
+    todo("dfu-nv.dfuserial.req_op")
+
+// The argument.
+pub fn req_arg(r: DfuSerialReq) -> Int []
+    todo("dfu-nv.dfuserial.req_arg")
+
+// The declared size.
+pub fn req_size(r: DfuSerialReq) -> Int []
+    todo("dfu-nv.dfuserial.req_size")
+
+// How many payload bytes follow.
+pub fn req_payload_len(r: DfuSerialReq) -> Int []
+    todo("dfu-nv.dfuserial.req_payload_len")
+
+// How many bytes this request occupies on the wire, its payload
+// excluded.
+pub fn req_len(r: DfuSerialReq) -> Int []
+    todo("dfu-nv.dfuserial.req_len")
+
+// The `i`-th wire byte of a request, its payload excluded — the
+// payload follows and is the caller's.
+//
+// ```novo
+// use dfuserial
+//
+// fn main() [io]
+//     let r = dfuserial.request(dfuserial.DFU_OP_PING, 0x42, 0, 0)
+//     println("${dfuserial.req_byte(r, 0)}")   // 9, the PING opcode
+// ```
+pub fn req_byte(r: DfuSerialReq, i: Int) -> Int []
+    todo("dfu-nv.dfuserial.req_byte")
+
+// Decode a request from the bytes at `off`.
+//
+// Answers a zeroed request on malformed input, because a `@value`
+// struct cannot be a `Result` payload (E2015); `check_request` is the
+// refusal.
+pub fn req_decode(buf: [u8], off: Int) -> DfuSerialReq []
+    todo("dfu-nv.dfuserial.req_decode")
+
+// Why a request cannot be acted on, or nothing.
+pub fn check_request(r: DfuSerialReq) -> ?DfuError []
+    todo("dfu-nv.dfuserial.check_request")
+
+// ── What a response is ───────────────────────────────────────────────
+
+// One response, as a value.
+//
+// The three numbers every reply in this protocol carries beyond its
+// result: a CRC, an offset and a size.  Which of them are meaningful
+// depends on the opcode, which is what `rsp_is_for` is for.
+pub @value
+struct DfuSerialRsp
+    // The opcode being answered.
+    op: Int
+    // One of the `DFU_RES_*` codes.
+    result: Int
+    // CRC_GET's running CRC-32; SELECT's CRC of what has arrived.
+    crc: Int
+    // CRC_GET's and SELECT's byte offset — how much has arrived.
+    offset: Int
+    // SELECT's maximum object size; MTU_GET's frame size.
+    size: Int
+
+// Build a response.
+pub fn response(op: Int, result: Int, crc: Int, offset: Int, size: Int) -> DfuSerialRsp []
+    todo("dfu-nv.dfuserial.response")
+
+// The opcode being answered.
+pub fn rsp_op(r: DfuSerialRsp) -> Int []
+    todo("dfu-nv.dfuserial.rsp_op")
+
+// The result code.
+pub fn rsp_result(r: DfuSerialRsp) -> Int []
+    todo("dfu-nv.dfuserial.rsp_result")
+
+// The CRC-32.
+pub fn rsp_crc(r: DfuSerialRsp) -> Int []
+    todo("dfu-nv.dfuserial.rsp_crc")
+
+// The byte offset.
+pub fn rsp_offset(r: DfuSerialRsp) -> Int []
+    todo("dfu-nv.dfuserial.rsp_offset")
+
+// The size.
+pub fn rsp_size(r: DfuSerialRsp) -> Int []
+    todo("dfu-nv.dfuserial.rsp_size")
+
+// Whether the response reports success.
+pub fn rsp_is_ok(r: DfuSerialRsp) -> Bool []
+    todo("dfu-nv.dfuserial.rsp_is_ok")
+
+// Whether this response answers that request.
+//
+// A serial link can deliver a stale reply after a timeout and retry,
+// and a host that acted on one would compare a CRC against the wrong
+// object — so the opcode is checked rather than assumed.
+//
+// ```novo
+// use dfuserial
+//
+// fn main() [io]
+//     let req = dfuserial.request(dfuserial.DFU_OP_CRC_GET, 0, 0, 0)
+//     let rsp = dfuserial.response(dfuserial.DFU_OP_CRC_GET, 1, 0, 0, 0)
+//     println("${dfuserial.rsp_is_for(rsp, req)}")   // true
+// ```
+pub fn rsp_is_for(r: DfuSerialRsp, q: DfuSerialReq) -> Bool []
+    todo("dfu-nv.dfuserial.rsp_is_for")
+
+// The `i`-th wire byte of a response.
+pub fn rsp_byte(r: DfuSerialRsp, i: Int) -> Int []
+    todo("dfu-nv.dfuserial.rsp_byte")
+
+// Decode a response from the bytes at `off`.
+pub fn rsp_decode(buf: [u8], off: Int) -> DfuSerialRsp []
+    todo("dfu-nv.dfuserial.rsp_decode")
+
+// Why a response cannot be acted on, or nothing.
+pub fn check_response(r: DfuSerialRsp, q: DfuSerialReq) -> ?DfuError []
+    todo("dfu-nv.dfuserial.check_response")
+
+// A result code in words.
+pub fn result_name(result: Int) -> Str []
+    todo("dfu-nv.dfuserial.result_name")
+
+// An opcode in words.
+pub fn op_name(op: Int) -> Str []
+    todo("dfu-nv.dfuserial.op_name")
+
+// ── The object state machine ─────────────────────────────────────────
+
+// A transfer in progress over the serial transport.
+//
+// Six integers, so a bootloader tracks one with nothing on a heap and
+// a host tracks the same thing in the same type.
+pub @value
+struct DfuSerialXfer
+    // One of the `DFU_XFER_*` codes.
+    state: Int
+    // The object type currently open.
+    object_type: Int
+    // The declared size of the current object.
+    object_size: Int
+    // How many bytes of it have been written.
+    written: Int
+    // The running CRC-32 the device last reported.
+    crc: Int
+    // The largest object this device will accept.
+    max_object: Int
+
+// Nothing is open.
+pub const DFU_XFER_IDLE = 0
+// An object has been created and is being written.
+pub const DFU_XFER_WRITING = 1
+// Every declared byte has been written and the CRC is being checked.
+pub const DFU_XFER_VERIFYING = 2
+// The object has been executed.
+pub const DFU_XFER_DONE = 3
+// Something refused.  `xfer_fault` says what.
+pub const DFU_XFER_FAILED = 4
+
+// A fresh transfer.
+//
+// ```novo
+// use dfuserial
+//
+// fn main() [io]
+//     println("${dfuserial.xfer_state(dfuserial.xfer())}")   // 0
+// ```
+pub fn xfer() -> DfuSerialXfer []
+    todo("dfu-nv.dfuserial.xfer")
+
+// The transfer after a SELECT response, which is what tells a host how
+// large an object may be and how much of one is already there.
+//
+// THE RESUME POINT.  A host reconnecting after a dropped link sends
+// SELECT, learns that 3 KB of a 4 KB object arrived and what its CRC
+// is, checks that against its own copy, and carries on from 3 KB.  A
+// protocol without it starts again, which on a slow UART is the
+// difference between an update that completes and one that never does.
+pub fn selected(x: DfuSerialXfer, r: DfuSerialRsp) -> DfuSerialXfer []
+    todo("dfu-nv.dfuserial.selected")
+
+// The transfer after an object of `size` bytes has been created.
+pub fn created(x: DfuSerialXfer, object_type: Int, size: Int) -> DfuSerialXfer []
+    todo("dfu-nv.dfuserial.created")
+
+// The transfer after `len` more payload bytes have been written.
+pub fn written(x: DfuSerialXfer, len: Int) -> DfuSerialXfer []
+    todo("dfu-nv.dfuserial.written")
+
+// The transfer after a CRC_GET response, which either confirms what
+// arrived or fails the object.
+//
+// `have_crc` is the caller's own running CRC over what it SENT.
+// Comparing the two before executing is what makes this protocol safe,
+// and passing the caller's value in rather than computing it here is
+// what keeps this module free of crc-nv.
+pub fn verified(x: DfuSerialXfer, r: DfuSerialRsp, have_crc: Int) -> DfuSerialXfer []
+    todo("dfu-nv.dfuserial.verified")
+
+// The transfer after an EXECUTE has succeeded.
+pub fn executed(x: DfuSerialXfer) -> DfuSerialXfer []
+    todo("dfu-nv.dfuserial.executed")
+
+// The state code.
+pub fn xfer_state(x: DfuSerialXfer) -> Int []
+    todo("dfu-nv.dfuserial.xfer_state")
+
+// How many bytes of the current object have been written.
+pub fn xfer_written(x: DfuSerialXfer) -> Int []
+    todo("dfu-nv.dfuserial.xfer_written")
+
+// How many bytes of the current object are still to come.
+pub fn xfer_remaining(x: DfuSerialXfer) -> Int []
+    todo("dfu-nv.dfuserial.xfer_remaining")
+
+// The running CRC the device last reported.
+pub fn xfer_crc(x: DfuSerialXfer) -> Int []
+    todo("dfu-nv.dfuserial.xfer_crc")
+
+// The largest object this device accepts.
+pub fn xfer_max_object(x: DfuSerialXfer) -> Int []
+    todo("dfu-nv.dfuserial.xfer_max_object")
+
+// Whether the current object is finished.
+pub fn xfer_is_done(x: DfuSerialXfer) -> Bool []
+    todo("dfu-nv.dfuserial.xfer_is_done")
+
+// Why a transfer failed, or nothing.
+pub fn xfer_fault(x: DfuSerialXfer) -> ?DfuError []
+    todo("dfu-nv.dfuserial.xfer_fault")
+
+// Why an object of `size` bytes cannot be created on this device, or
+// nothing.
+//
+// The serial equivalent of `wTransferSize`: a create larger than the
+// device's staging buffer is a promise it cannot keep.
+pub fn check_create(x: DfuSerialXfer, size: Int) -> ?DfuError []
+    todo("dfu-nv.dfuserial.check_create")
+
+// How many objects of at most `max_object` bytes an image of
+// `image_len` bytes takes.
+//
+// ```novo
+// use dfuserial
+//
+// fn main() [io]
+//     println("${dfuserial.object_count(10000, 4096)}")   // 3
+// ```
+pub fn object_count(image_len: Int, max_object: Int) -> Int []
+    todo("dfu-nv.dfuserial.object_count")
+
+// How many payload bytes fit one frame, given the device's reported
+// frame size.
+//
+// The frame carries the opcode and frame-nv's own overhead as well as
+// the payload, so a host that sent `mtu` bytes of payload would
+// produce a frame the device drops — silently, because a dropped frame
+// on a UART is indistinguishable from noise.
+pub fn payload_per_frame(mtu: Int) -> Int []
+    todo("dfu-nv.dfuserial.payload_per_frame")

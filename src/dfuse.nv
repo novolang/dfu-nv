@@ -1,0 +1,208 @@
+// dfuse.nv — ST's DfuSe extensions, named.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// WHY A DEVICE NEEDS THEM AT ALL.  Plain DFU 1.1 numbers its blocks in
+// sixteen bits and has no way to say WHERE a block goes: the device
+// decides, and a device with one firmware slot can. A device with
+// several — a bootloader, an application, a filesystem and a
+// configuration page in different parts of its address space — cannot,
+// and a device with more than `65536 * wTransferSize` bytes of flash
+// cannot address the far end at all.  DfuSe's answer is a command
+// channel smuggled through block 0 of DNLOAD: SET_ADDRESS_POINTER
+// moves a cursor, ERASE erases a page, and subsequent blocks are
+// written relative to the pointer.
+//
+// WHY IT IS NAMED HERE RATHER THAN IMPLEMENTED.  DfuSe is ST's, it is
+// not in any published standard, its own tooling is the only complete
+// reference, and no board this project supports uses it — the nRF52
+// kits update over the serial protocol in `dfuserial` and the RP2040
+// over a mass-storage bootloader that is neither.  So what this module
+// publishes is the vocabulary a reader meets in a capture and the
+// arithmetic a host needs to RECOGNISE a DfuSe device, without
+// claiming a full implementation nobody here can test.
+//
+// A DEVICE DECLARES IT IN bcdDFUVersion: 0x011A rather than 0x0110,
+// which `dfuusb.is_dfuse` reads.  A host that sends DfuSe commands to
+// a plain DFU 1.1 device writes them into the firmware as data, which
+// produces a device that flashes successfully and does not boot.
+
+// ── The version that declares it ─────────────────────────────────────
+
+// bcdDFUVersion for plain DFU 1.1: 0x0110.
+pub const DFUSE_VERSION_PLAIN = 0x0110
+// bcdDFUVersion for DfuSe: 0x011A.
+pub const DFUSE_VERSION_DFUSE = 0x011A
+
+// Whether a bcdDFUVersion declares the DfuSe extensions.
+//
+// ```novo
+// use dfuse
+//
+// fn main() [io]
+//     println("${dfuse.speaks_dfuse(dfuse.DFUSE_VERSION_DFUSE)}")   // true
+// ```
+pub fn speaks_dfuse(bcd_dfu: Int) -> Bool []
+    todo("dfu-nv.dfuse.speaks_dfuse")
+
+// ── The commands, which ride in block 0 ──────────────────────────────
+
+// GET_COMMANDS: the device answers which of these it implements.  A
+// zero-length DNLOAD block 0 followed by an UPLOAD.
+pub const DFUSE_CMD_GET_COMMANDS = 0x00
+// SET_ADDRESS_POINTER: the next four bytes are an address the
+// subsequent blocks are written relative to.
+pub const DFUSE_CMD_SET_ADDRESS = 0x21
+// ERASE: erase the page containing the address in the next four
+// bytes.  A one-byte command with no address erases EVERYTHING, which
+// is a distinction worth stating rather than discovering.
+pub const DFUSE_CMD_ERASE = 0x41
+// READ_UNPROTECT: remove the device's read protection, which erases
+// the whole flash as a side effect.
+pub const DFUSE_CMD_READ_UNPROTECT = 0x92
+
+// How many bytes a SET_ADDRESS_POINTER command occupies: 5.
+pub const DFUSE_SET_ADDRESS_LEN = 5
+// How many bytes an ERASE command with an address occupies: 5.
+pub const DFUSE_ERASE_PAGE_LEN = 5
+// How many bytes a mass-erase ERASE occupies: 1.
+pub const DFUSE_ERASE_ALL_LEN = 1
+
+// The `i`-th byte of a SET_ADDRESS_POINTER command: the opcode, then
+// the address little-endian.
+//
+// ```novo
+// use dfuse
+//
+// fn main() [io]
+//     println("${dfuse.set_address_byte(0x08000000, 0)}")   // 33, the opcode
+// ```
+pub fn set_address_byte(address: Int, i: Int) -> Int []
+    todo("dfu-nv.dfuse.set_address_byte")
+
+// The `i`-th byte of an ERASE command for the page containing
+// `address`.
+pub fn erase_page_byte(address: Int, i: Int) -> Int []
+    todo("dfu-nv.dfuse.erase_page_byte")
+
+// The single byte of a mass-erase ERASE.
+//
+// A DIFFERENT COMMAND FROM A PAGE ERASE, spelled with the same opcode
+// and one byte fewer, and the one place in DfuSe where a length
+// mistake destroys the whole device rather than a page of it.
+pub fn erase_all_byte() -> Int []
+    todo("dfu-nv.dfuse.erase_all_byte")
+
+// The command a DNLOAD block 0 carries, or -1 when it is not a
+// command at all.
+pub fn command_of(buf: [u8], off: Int, len: Int) -> Int []
+    todo("dfu-nv.dfuse.command_of")
+
+// The address a SET_ADDRESS_POINTER or page ERASE names.
+pub fn address_of(buf: [u8], off: Int, len: Int) -> Int []
+    todo("dfu-nv.dfuse.address_of")
+
+// Whether a block-0 command is a mass erase rather than a page erase.
+//
+// Read off the LENGTH, which is the only thing that distinguishes
+// them, and named as a question so that a host with a page address in
+// hand cannot accidentally send the shorter form.
+pub fn is_mass_erase(buf: [u8], off: Int, len: Int) -> Bool []
+    todo("dfu-nv.dfuse.is_mass_erase")
+
+// ── Addressing ───────────────────────────────────────────────────────
+
+// How many bytes plain DFU 1.1 can address at this transfer size,
+// before the sixteen-bit block number wraps.
+//
+// The number that decides whether a device needs DfuSe at all: at the
+// usual 64-byte transfer size it is 4 MB, and at 2048 bytes it is
+// 128 MB.  A host that knows this can choose a larger transfer size
+// instead of reaching for an extension.
+//
+// ```novo
+// use dfuse
+//
+// fn main() [io]
+//     println("${dfuse.plain_reach(64)}")   // 4194304
+// ```
+pub fn plain_reach(transfer_size: Int) -> Int []
+    todo("dfu-nv.dfuse.plain_reach")
+
+// Whether an image of this size at this transfer size needs DfuSe's
+// address pointer to be reachable.
+pub fn needs_address_pointer(image_len: Int, transfer_size: Int) -> Bool []
+    todo("dfu-nv.dfuse.needs_address_pointer")
+
+// The block number a DfuSe DNLOAD uses for the byte at `offset` from
+// the address pointer.
+//
+// DfuSe's data blocks start at 2, not 0: block 0 is the command
+// channel and block 1 is reserved, so a host that numbered its first
+// data block 0 sends its firmware's first bytes as a command.
+//
+// ```novo
+// use dfuse
+//
+// fn main() [io]
+//     println("${dfuse.data_block_number(0, 2048)}")   // 2
+// ```
+pub fn data_block_number(offset: Int, transfer_size: Int) -> Int []
+    todo("dfu-nv.dfuse.data_block_number")
+
+// The first block number DfuSe uses for data: 2.
+pub const DFUSE_FIRST_DATA_BLOCK = 2
+
+// ── The file suffix ──────────────────────────────────────────────────
+
+// How many bytes a DFU file suffix occupies: 16.
+//
+// The suffix is the one part of ST's tooling that IS standardised —
+// DFU 1.1's own appendix — and it is what `dfu-util` reads to decide
+// whether a file is for the device in front of it: a vendor
+// identifier, a product identifier, a device version, the signature
+// `UFD`, and a CRC-32 over everything before it.
+pub const DFUSE_SUFFIX_LEN = 16
+
+// The three bytes a DFU file suffix ends its signature with, read
+// backwards from the end: `U`, `F`, `D`.
+pub const DFUSE_SUFFIX_SIGNATURE = 0x444655
+
+// Whether the bytes ending at `end` carry a DFU file suffix.
+//
+// Read from the END of a file, which is the one thing about this
+// format worth stating: the suffix has no header, it is appended, and
+// a reader that looked for it at the front finds firmware.
+pub fn has_suffix(buf: [u8], end: Int) -> Bool []
+    todo("dfu-nv.dfuse.has_suffix")
+
+// The vendor identifier a suffix names, or -1.  0xFFFF means "any
+// vendor", which is not the same as absent.
+pub fn suffix_vendor(buf: [u8], end: Int) -> Int []
+    todo("dfu-nv.dfuse.suffix_vendor")
+
+// The product identifier a suffix names, or -1.
+pub fn suffix_product(buf: [u8], end: Int) -> Int []
+    todo("dfu-nv.dfuse.suffix_product")
+
+// The device version a suffix names, or -1.
+pub fn suffix_device(buf: [u8], end: Int) -> Int []
+    todo("dfu-nv.dfuse.suffix_device")
+
+// Whether a suffix admits a device with these identifiers, 0xFFFF
+// wildcards honoured.
+pub fn suffix_matches(buf: [u8], end: Int, vendor: Int, product: Int) -> Bool []
+    todo("dfu-nv.dfuse.suffix_matches")
+
+// Why a file's suffix refuses this device, or nothing.
+pub fn check_suffix(buf: [u8], end: Int, vendor: Int, product: Int) -> ?DfuError []
+    todo("dfu-nv.dfuse.check_suffix")
+
+// The `i`-th byte of a suffix for these identifiers, with the CRC the
+// caller computed over everything before it.
+//
+// The CRC is the caller's for the same reason it is everywhere else in
+// this package: crc-nv computes it, `dfucrc` is the bridge, and the
+// arithmetic here stays free of a dependency.
+pub fn suffix_byte(vendor: Int, product: Int, device: Int, crc: Int, i: Int) -> Int []
+    todo("dfu-nv.dfuse.suffix_byte")

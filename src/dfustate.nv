@@ -1,0 +1,423 @@
+// dfustate.nv — the USB DFU 1.1 state machine.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// `DfuStep` IS THE LOAD-BEARING INTERFACE OF THIS PACKAGE, and the
+// field that makes it so is `poll_timeout_ms`.
+//
+// DFU 1.1 § 6.1.2: after every DNLOAD the host MUST issue GETSTATUS,
+// and the device's reply carries `bwPollTimeout` — how many
+// milliseconds the host has to wait before asking again.  The device
+// is erasing or programming flash during that window, and a host that
+// sends the next block early gets a stall at best and a half-written
+// page at worst.  There is no other mechanism: DFU has no flow
+// control, no window, no acknowledgement of a write.  The whole
+// protocol's back-pressure is that one number.
+//
+// A design that returned `Result<(), DfuError>` from a "write block"
+// call has nowhere to put it, so every implementation that starts that
+// way ends up with a hidden sleep inside the transport, which means
+// the timing is untestable and the device's own number is ignored.
+// Here the machine ANSWERS the deadline and the caller waits — which
+// also keeps this module `core`, because a package with no clock
+// cannot wait.
+//
+// THE STATE IS THE DEVICE'S AND THE HOST TRACKS A COPY.  DFU's ten
+// states live on the device; the host learns them from GETSTATUS
+// replies.  `DfuState` is therefore used by both halves and means the
+// same thing in both, which is why this module has no host and no
+// device in it — the serial bootloader in `dfuserial` drives the same
+// machine over a different wire, and `dfuusb` is only the mapping to
+// USB control transfers.
+//
+// WHY INT CODES AND NOT AN ENUM.  A `@value` struct cannot hold an
+// enum at all, even a payload-free one (E2011), and both `DfuStatus`
+// and `DfuStep` have to be `@value` — a bootloader answers GETSTATUS
+// from an interrupt on a part with no allocator.  So the states, the
+// requests and the status codes are `Int` discriminants with named
+// constants as the vocabulary, and `state_name`, `request_name` and
+// `status_name` turn one back into words.
+
+// ── The ten states (DFU 1.1 table 6.1) ───────────────────────────────
+
+// The device is running its application and is not expecting a
+// download.
+pub const DFU_STATE_APP_IDLE = 0
+// The application has seen DFU_DETACH and is waiting for a USB reset,
+// after which it enumerates as a bootloader.
+pub const DFU_STATE_APP_DETACH = 1
+// The bootloader is running and nothing is in progress.
+pub const DFU_STATE_DFU_IDLE = 2
+// A DNLOAD has been received and the device is waiting for the
+// GETSTATUS that must follow it.
+pub const DFU_STATE_DNLOAD_SYNC = 3
+// The device is writing.  It answers GETSTATUS with a poll timeout and
+// nothing else may be sent until that elapses.
+pub const DFU_STATE_DNBUSY = 4
+// A block has been written and the device is ready for the next.
+pub const DFU_STATE_DNLOAD_IDLE = 5
+// The final zero-length DNLOAD has been received and the device is
+// waiting for the GETSTATUS that begins manifestation.
+pub const DFU_STATE_MANIFEST_SYNC = 6
+// The device is committing the new firmware — writing a signature,
+// flipping a boot slot, computing a final checksum.
+pub const DFU_STATE_MANIFEST = 7
+// Manifestation is complete and the device is waiting for a USB reset.
+// A device whose `bmAttributes` lacks `DFU_ATTR_MANIFEST_TOLERANT`
+// cannot answer anything here except GETSTATUS.
+pub const DFU_STATE_MANIFEST_WAIT_RESET = 8
+// An upload is in progress.
+pub const DFU_STATE_UPLOAD_IDLE = 9
+// Something went wrong.  The device stays here until CLRSTATUS, which
+// is the only request that leaves it.
+pub const DFU_STATE_ERROR = 10
+
+// ── The eight requests (DFU 1.1 table 3.2) ───────────────────────────
+
+// DFU_DETACH — leave the application and enumerate as a bootloader.
+pub const DFU_REQ_DETACH = 0
+// DFU_DNLOAD — one block of firmware, or a zero-length block to end
+// the transfer.
+pub const DFU_REQ_DNLOAD = 1
+// DFU_UPLOAD — read a block back from the device.
+pub const DFU_REQ_UPLOAD = 2
+// DFU_GETSTATUS — the request that carries the poll timeout, and the
+// one a download cannot proceed without.
+pub const DFU_REQ_GETSTATUS = 3
+// DFU_CLRSTATUS — the only way out of the error state.
+pub const DFU_REQ_CLRSTATUS = 4
+// DFU_GETSTATE — the state alone, with no side effect.  Distinct from
+// GETSTATUS, which ADVANCES the machine: a host that polls with
+// GETSTATE while a download is in progress waits forever.
+pub const DFU_REQ_GETSTATE = 5
+// DFU_ABORT — return to the idle state, discarding what was
+// transferred.
+pub const DFU_REQ_ABORT = 6
+
+// ── The status codes (DFU 1.1 table 6.2) ─────────────────────────────
+
+// No error.
+pub const DFU_STATUS_OK = 0x00
+// The file is not for this device.
+pub const DFU_STATUS_ERR_TARGET = 0x01
+// The file fails a vendor-specific check.
+pub const DFU_STATUS_ERR_FILE = 0x02
+// The device could not write.
+pub const DFU_STATUS_ERR_WRITE = 0x03
+// The device could not erase.
+pub const DFU_STATUS_ERR_ERASE = 0x04
+// The erase check failed.
+pub const DFU_STATUS_ERR_CHECK_ERASED = 0x05
+// The device could not program.
+pub const DFU_STATUS_ERR_PROG = 0x06
+// The device's own verification of the written firmware failed.
+pub const DFU_STATUS_ERR_VERIFY = 0x07
+// The address is out of range.
+pub const DFU_STATUS_ERR_ADDRESS = 0x08
+// A zero-length DNLOAD arrived and the device expected more data.
+pub const DFU_STATUS_ERR_NOTDONE = 0x09
+// The firmware is corrupt and cannot run.  What a device answers after
+// a failed update, and the code a host most needs to recognise,
+// because it means try again rather than replace the board.
+pub const DFU_STATUS_ERR_FIRMWARE = 0x0A
+// An unexpected vendor error.
+pub const DFU_STATUS_ERR_VENDOR = 0x0B
+// The device detected an unexpected USB reset.
+pub const DFU_STATUS_ERR_USBR = 0x0C
+// The device detected an unexpected power-on reset.
+pub const DFU_STATUS_ERR_POR = 0x0D
+// Something unexpected.
+pub const DFU_STATUS_ERR_UNKNOWN = 0x0E
+// The device stalled an unexpected request.
+pub const DFU_STATUS_ERR_STALLEDPKT = 0x0F
+
+// ── The functional descriptor's attributes ───────────────────────────
+
+// The device can download firmware.
+pub const DFU_ATTR_CAN_DNLOAD = 0x01
+// The device can upload firmware back.
+pub const DFU_ATTR_CAN_UPLOAD = 0x02
+// The device can communicate during manifestation, so the host does
+// not have to guess when it is finished.
+pub const DFU_ATTR_MANIFEST_TOLERANT = 0x04
+// The device will detach on its own without a USB reset from the host.
+pub const DFU_ATTR_WILL_DETACH = 0x08
+
+// ── What GETSTATUS answers ───────────────────────────────────────────
+
+// The six bytes of a GETSTATUS reply.
+//
+// A `@value` struct, because a bootloader answers this from a control
+// transfer on a part with no allocator.
+pub @value
+struct DfuStatus
+    // bStatus: one of the `DFU_STATUS_*` codes.
+    status: Int
+    // bwPollTimeout: how many milliseconds the host must wait before
+    // the next request.  Twenty-four bits on the wire, little-endian,
+    // and the only back-pressure the protocol has.
+    poll_timeout_ms: Int
+    // bState: one of the `DFU_STATE_*` codes.
+    state: Int
+    // iString: the index of a string describing the status, or 0.
+    string_index: Int
+
+// How many bytes a GETSTATUS reply occupies: 6.
+pub const DFU_STATUS_LEN = 6
+
+// Build a status reply.
+//
+// ```novo
+// use dfustate
+//
+// fn main() [io]
+//     let s = dfustate.status(dfustate.DFU_STATUS_OK, 100,
+//                             dfustate.DFU_STATE_DNBUSY, 0)
+//     println("${dfustate.poll_timeout_ms(s)}")   // 100
+// ```
+pub fn status(status: Int, poll_timeout_ms: Int, state: Int, string_index: Int) -> DfuStatus []
+    todo("dfu-nv.dfustate.status")
+
+// bStatus.
+pub fn status_code(s: DfuStatus) -> Int []
+    todo("dfu-nv.dfustate.status_code")
+
+// bwPollTimeout, in milliseconds.
+pub fn poll_timeout_ms(s: DfuStatus) -> Int []
+    todo("dfu-nv.dfustate.poll_timeout_ms")
+
+// bState.
+pub fn status_state(s: DfuStatus) -> Int []
+    todo("dfu-nv.dfustate.status_state")
+
+// iString.
+pub fn status_string_index(s: DfuStatus) -> Int []
+    todo("dfu-nv.dfustate.status_string_index")
+
+// Whether the status reports no error.
+pub fn status_is_ok(s: DfuStatus) -> Bool []
+    todo("dfu-nv.dfustate.status_is_ok")
+
+// The `i`-th of the six wire bytes: status, then the poll timeout as
+// three little-endian bytes, then the state and the string index.
+//
+// ```novo
+// use dfustate
+//
+// fn main() [io]
+//     let s = dfustate.status(0, 100, 4, 0)
+//     println("${dfustate.status_byte(s, 1)}")   // 100
+// ```
+pub fn status_byte(s: DfuStatus, i: Int) -> Int []
+    todo("dfu-nv.dfustate.status_byte")
+
+// Decode a status reply from the six bytes at `off`.
+//
+// Answers a zeroed status when fewer than six bytes are available,
+// because a `@value` struct cannot be a `Result` payload (E2015);
+// `check_status` is the refusal beside it.
+pub fn status_decode(buf: [u8], off: Int) -> DfuStatus []
+    todo("dfu-nv.dfustate.status_decode")
+
+// Why a status reply cannot be acted on, or nothing.
+pub fn check_status(s: DfuStatus) -> ?DfuError []
+    todo("dfu-nv.dfustate.check_status")
+
+// ── The step ─────────────────────────────────────────────────────────
+
+// What one request does to the machine, and what the caller owes
+// afterwards.
+//
+// `wait_ms` is the field this type exists for: a caller that ignores
+// it writes the next block while the device is still erasing, and the
+// symptom is a device that updates on a slow machine and bricks on a
+// fast one.
+pub @value
+struct DfuStep
+    // One of the `DFU_ACT_*` codes.
+    action: Int
+    // The state the device is in after this request.
+    next_state: Int
+    // The status the device would now report.
+    status: Int
+    // How many milliseconds the caller must wait before its next
+    // request.  0 means carry on.
+    wait_ms: Int
+    // How many bytes the request carries or expects.
+    len: Int
+
+// Nothing to do.
+pub const DFU_ACT_NONE = 0
+// Send the next block of firmware.
+pub const DFU_ACT_SEND_BLOCK = 1
+// Read a block back from the device.
+pub const DFU_ACT_READ_BLOCK = 2
+// Ask for the status, which is what a download proceeds by.
+pub const DFU_ACT_POLL_STATUS = 3
+// Wait `wait_ms` and then poll again.  The device is erasing or
+// programming.
+pub const DFU_ACT_WAIT = 4
+// The transfer is complete and the device is committing it.
+pub const DFU_ACT_MANIFEST = 5
+// Reset the bus; the device comes back running the new firmware.
+pub const DFU_ACT_RESET = 6
+// Clear the error state, which is the only way out of it.
+pub const DFU_ACT_CLEAR_ERROR = 7
+// The request was refused.  `step_fault` says why.
+pub const DFU_ACT_REFUSED = 8
+
+// The device state a fresh bootloader is in.
+//
+// ```novo
+// use dfustate
+//
+// fn main() [io]
+//     println("${dfustate.DFU_STATE_DFU_IDLE}")   // 2
+// ```
+pub fn initial_state() -> Int []
+    todo("dfu-nv.dfustate.initial_state")
+
+// What `request` does to a device in `state`.
+//
+// `len` is the length of the block the request carries — 0 for a
+// zero-length DNLOAD, which is how a download declares itself
+// finished.  `reported` is the status the device last gave, which is
+// what decides whether a GETSTATUS means "carry on" or "wait".
+//
+// ```novo
+// use dfustate
+//
+// fn main() [io]
+//     let st = dfustate.step(dfustate.DFU_STATE_DFU_IDLE,
+//                            dfustate.DFU_REQ_DNLOAD, 64,
+//                            dfustate.status(0, 0, 2, 0))
+//     println("${dfustate.step_next_state(st)}")   // 3, DNLOAD_SYNC
+// ```
+pub fn step(state: Int, request: Int, len: Int, reported: DfuStatus) -> DfuStep []
+    todo("dfu-nv.dfustate.step")
+
+// The action code.
+pub fn step_action(st: DfuStep) -> Int []
+    todo("dfu-nv.dfustate.step_action")
+
+// The state after this request.
+pub fn step_next_state(st: DfuStep) -> Int []
+    todo("dfu-nv.dfustate.step_next_state")
+
+// The status the device would now report.
+pub fn step_status(st: DfuStep) -> Int []
+    todo("dfu-nv.dfustate.step_status")
+
+// How many milliseconds to wait before the next request.
+//
+// The number the whole protocol's back-pressure is, answered rather
+// than slept through — which is what keeps this module `core` and what
+// makes the timing a table rather than a hardware run.
+//
+// ```novo
+// use dfustate
+//
+// fn main() [io]
+//     let busy = dfustate.status(0, 250, dfustate.DFU_STATE_DNBUSY, 0)
+//     let st = dfustate.step(dfustate.DFU_STATE_DNLOAD_SYNC,
+//                            dfustate.DFU_REQ_GETSTATUS, 0, busy)
+//     println("${dfustate.step_wait_ms(st)}")   // 250
+// ```
+pub fn step_wait_ms(st: DfuStep) -> Int []
+    todo("dfu-nv.dfustate.step_wait_ms")
+
+// How many bytes the action moves.
+pub fn step_len(st: DfuStep) -> Int []
+    todo("dfu-nv.dfustate.step_len")
+
+// Why the request was refused, or nothing.
+pub fn step_fault(st: DfuStep) -> ?DfuError []
+    todo("dfu-nv.dfustate.step_fault")
+
+// ── Questions about a state ──────────────────────────────────────────
+
+// Whether `request` is one a device in `state` may be sent at all.
+//
+// The check DFU's own table is, written once.  A request sent in the
+// wrong state is answered with a stall and the device drops into the
+// error state, which costs a CLRSTATUS and — if the host does not
+// recognise what happened — an abandoned update.
+//
+// ```novo
+// use dfustate
+//
+// fn main() [io]
+//     println("${dfustate.request_allowed(dfustate.DFU_STATE_ERROR, dfustate.DFU_REQ_DNLOAD)}")
+// ```
+pub fn request_allowed(state: Int, request: Int) -> Bool []
+    todo("dfu-nv.dfustate.request_allowed")
+
+// Whether the device is in the error state.
+pub fn is_error_state(state: Int) -> Bool []
+    todo("dfu-nv.dfustate.is_error_state")
+
+// Whether a download is in progress.
+pub fn is_downloading(state: Int) -> Bool []
+    todo("dfu-nv.dfustate.is_downloading")
+
+// Whether the device is committing an update, during which it may be
+// unable to answer anything.
+pub fn is_manifesting(state: Int) -> Bool []
+    todo("dfu-nv.dfustate.is_manifesting")
+
+// Whether the device is running its application rather than a
+// bootloader.
+//
+// The state a host has to notice before it starts: a DNLOAD to an
+// application-mode device is refused, and the way in is DETACH
+// followed by a bus reset.
+pub fn is_application(state: Int) -> Bool []
+    todo("dfu-nv.dfustate.is_application")
+
+// Whether a device with these `bmAttributes` can tell the host when
+// manifestation has finished.
+//
+// A device without `DFU_ATTR_MANIFEST_TOLERANT` goes silent after the
+// last block and the host has to reset the bus on a timer, which is
+// the one place in DFU where a host is guessing.
+pub fn is_manifest_tolerant(attributes: Int) -> Bool []
+    todo("dfu-nv.dfustate.is_manifest_tolerant")
+
+// How many blocks of `block_size` bytes an image of `image_len` bytes
+// takes, the final zero-length block included.
+//
+// ```novo
+// use dfustate
+//
+// fn main() [io]
+//     println("${dfustate.block_count(4096, 1024)}")   // 5
+// ```
+pub fn block_count(image_len: Int, block_size: Int) -> Int []
+    todo("dfu-nv.dfustate.block_count")
+
+// The `wValue` a DNLOAD or UPLOAD for block `n` carries.
+//
+// Sixteen bits, so a transfer of more than 65536 blocks wraps — which
+// at the usual 64-byte block size is 4 MB and is the reason a device
+// with more flash than that needs DfuSe's address pointer.  `dfuse` is
+// the module for it.
+pub fn block_number(n: Int) -> Int []
+    todo("dfu-nv.dfustate.block_number")
+
+// The largest image a plain DFU 1.1 transfer can carry at this block
+// size, before the block number wraps.
+pub fn max_image_len(block_size: Int) -> Int []
+    todo("dfu-nv.dfustate.max_image_len")
+
+// A state code in words, for a log.
+pub fn state_name(state: Int) -> Str []
+    todo("dfu-nv.dfustate.state_name")
+
+// A request code in words.
+pub fn request_name(request: Int) -> Str []
+    todo("dfu-nv.dfustate.request_name")
+
+// A status code in words — DFU 1.1's own sentences, so a device that
+// says `errVERIFY` and a host that reports it agree.
+pub fn status_name(status: Int) -> Str []
+    todo("dfu-nv.dfustate.status_name")
