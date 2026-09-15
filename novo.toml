@@ -1,6 +1,6 @@
 [package]
 name        = "dfu-nv"
-version     = "0.0.1"
+version     = "0.0.2"
 description = "Firmware update over USB and over serial: the USB DFU 1.1 class state machine with its requests and status codes, a signed image format with a CRC-32 and a signature slot the caller fills, the object-based serial bootloader protocol over frame-nv, and a host-side updater that drives either transport.  Interface only — every body is a todo()."
 license     = "Apache-2.0"
 
