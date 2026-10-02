@@ -40,7 +40,7 @@ struct DfuTape
 impl DfuTransport[] for DfuTape
     fn dfu_exchange(self, request: Int, value: Int, data: Bytes,
                     expect: Int) -> Result<Bytes, DfuError> []
-        Ok(data)
+        Ok(bytes.clone(data))
 
     fn dfu_reset(self) -> ?DfuError []
         None
